@@ -27,6 +27,11 @@ class Settings(BaseSettings):
 
     log_level: str = "INFO"
     pipeline_cron_hour: int = 2
+    resume_storage_path: str = "/app/resumes"
+
+    seed_user_name: str = "Admin"
+    seed_user_email: str = ""
+    seed_user_password: str = ""
 
     @property
     def database_url(self) -> str:

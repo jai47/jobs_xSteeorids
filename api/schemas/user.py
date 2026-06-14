@@ -1,2 +1,59 @@
-pass
+"""Pydantic schemas for user profile and auth."""
 
+from __future__ import annotations
+
+from pydantic import BaseModel, Field
+
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+
+class LoginResponse(BaseModel):
+    token: str
+    user_id: str
+    name: str
+    email: str
+
+
+class UserProfileResponse(BaseModel):
+    id: str
+    name: str
+    email: str
+    nationality: str | None = None
+    preferred_countries: list[str] = Field(default_factory=list)
+    preferred_roles: list[str] = Field(default_factory=list)
+    prefers_remote: bool = False
+    salary_range_min: int | None = None
+    salary_range_max: int | None = None
+    salary_currency: str = "USD"
+    years_experience: int | None = None
+    parsed_skills: list[str] = Field(default_factory=list)
+    has_active_resume: bool = False
+
+
+class UserProfileUpdate(BaseModel):
+    nationality: str | None = None
+    preferred_countries: list[str] | None = None
+    preferred_roles: list[str] | None = None
+    prefers_remote: bool | None = None
+    salary_range_min: int | None = None
+    salary_range_max: int | None = None
+    salary_currency: str | None = None
+    years_experience: int | None = None
+
+
+class LLMStatusResponse(BaseModel):
+    anthropic_configured: bool
+    openai_configured: bool
+
+
+class ResumeUploadResponse(BaseModel):
+    master_resume_id: str
+    filename: str
+    skills: list[str]
+    experience_years: int | None
+    previous_titles: list[str]
+    education: list[str]
+    languages: list[str]
