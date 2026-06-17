@@ -57,3 +57,15 @@ class ResumeUploadResponse(BaseModel):
     previous_titles: list[str]
     education: list[str]
     languages: list[str]
+
+
+class BlacklistResponse(BaseModel):
+    blacklisted_companies: list[str] = Field(default_factory=list)
+    blacklisted_roles: list[str] = Field(default_factory=list)
+    blacklisted_locations: list[str] = Field(default_factory=list)
+
+
+class BlacklistUpdate(BaseModel):
+    blacklisted_companies: list[str] | None = None
+    blacklisted_roles: list[str] | None = None
+    blacklisted_locations: list[str] | None = None
