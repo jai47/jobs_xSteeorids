@@ -6,16 +6,12 @@ import logging
 import threading
 
 from db.engine import get_session
-from pipeline.pipeline import run_nightly_pipeline
+from pipeline.pipeline import PipelineAlreadyRunningError, run_nightly_pipeline
 
 log = logging.getLogger(__name__)
 
 _thread: threading.Thread | None = None
 _lock = threading.Lock()
-
-
-class PipelineAlreadyRunningError(Exception):
-    """Raised when a background pipeline thread is already active."""
 
 
 def is_background_pipeline_running() -> bool:

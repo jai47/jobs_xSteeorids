@@ -11,7 +11,6 @@ from api.deps import APIError, get_current_user, get_db
 from api.schemas.pipeline import LLMUsageResponse, PipelineRunListResponse, PipelineRunResponse
 from db.models import LLMUsage, PipelineRun, User
 from pipeline.pipeline import PipelineAlreadyRunningError, start_pipeline_run
-from pipeline.runner import PipelineAlreadyRunningError as BackgroundPipelineRunningError
 from pipeline.runner import schedule_pipeline_run
 
 router = APIRouter(prefix="/pipeline", tags=["pipeline"])
@@ -52,7 +51,7 @@ def trigger_pipeline_run(
     try:
         run = start_pipeline_run(db)
         schedule_pipeline_run()
-    except (PipelineAlreadyRunningError, BackgroundPipelineRunningError):
+    except PipelineAlreadyRunningError:
         raise APIError(409, "Pipeline is already running", "PIPELINE_RUNNING") from None
     return _run_response(run)
 
