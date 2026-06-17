@@ -9,6 +9,8 @@ from sqlalchemy.orm import Session
 
 from api.deps import APIError, get_current_user, get_db
 from api.schemas.user import (
+    BlacklistResponse,
+    BlacklistUpdate,
     LLMStatusResponse,
     ResumeUploadResponse,
     UserProfileResponse,
@@ -98,4 +100,34 @@ def llm_status() -> LLMStatusResponse:
     return LLMStatusResponse(
         anthropic_configured=bool(settings.anthropic_api_key),
         openai_configured=bool(settings.openai_api_key),
+    )
+
+
+@router.get("/users/me/blacklists", response_model=BlacklistResponse)
+def get_blacklists(
+    user: Annotated[User, Depends(get_current_user)],
+) -> BlacklistResponse:
+    """Return the user's company, role, and location blacklists."""
+    return BlacklistResponse(
+        blacklisted_companies=list(user.blacklisted_companies or []),
+        blacklisted_roles=list(user.blacklisted_roles or []),
+        blacklisted_locations=list(user.blacklisted_locations or []),
+    )
+
+
+@router.patch("/users/me/blacklists", response_model=BlacklistResponse)
+def update_blacklists(
+    payload: BlacklistUpdate,
+    user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> BlacklistResponse:
+    """Replace blacklist fields provided in the request."""
+    updates = payload.model_dump(exclude_unset=True)
+    for field, value in updates.items():
+        setattr(user, field, value)
+    db.flush()
+    return BlacklistResponse(
+        blacklisted_companies=list(user.blacklisted_companies or []),
+        blacklisted_roles=list(user.blacklisted_roles or []),
+        blacklisted_locations=list(user.blacklisted_locations or []),
     )

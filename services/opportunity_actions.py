@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from api.deps import APIError
 from db.models import Application, Job, ScoredOpportunity, User
+from services.resume_tailoring import create_tailored_resume_version, get_active_master_resume
 
 VALID_REJECT_REASONS = {"company", "role", "location", "other"}
 
@@ -78,10 +79,13 @@ def approve_opportunity(
     user: User,
     opportunity_id: uuid.UUID,
 ) -> tuple[ScoredOpportunity, Application]:
-    """Mark an opportunity approved and create or update its application."""
+    """Tailor resume, mark approved, and create or update the application."""
     opp, job = _get_opportunity_for_user(session, user, opportunity_id)
     if opp.user_feedback == "approved":
         raise APIError(409, "Opportunity already approved", "CONFLICT")
+
+    master = get_active_master_resume(session, user)
+    resume_version = create_tailored_resume_version(session, user, job, master)
 
     opp.user_feedback = "approved"
     opp.reject_reason = None
@@ -95,11 +99,13 @@ def approve_opportunity(
         application = Application(
             job_id=job.id,
             user_id=user.id,
+            resume_version_id=resume_version.id,
             status="approved",
         )
         session.add(application)
     else:
         application.status = "approved"
+        application.resume_version_id = resume_version.id
 
     session.flush()
     return opp, application

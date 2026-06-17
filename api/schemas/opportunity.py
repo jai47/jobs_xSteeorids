@@ -24,6 +24,7 @@ class OpportunitySummary(BaseModel):
     digest_date: date | None = None
     created_at: datetime | None = None
     url: str | None = None
+    is_stale: bool = False
 
 
 class OpportunityDetail(OpportunitySummary):

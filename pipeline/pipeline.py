@@ -20,12 +20,41 @@ from pipeline.stages.company_universe import update_company_universe
 from pipeline.stages.dedup import deduplicate
 from pipeline.stages.digest import generate_digest_for_user
 from pipeline.stages.fit_scorer import score_fit
+from pipeline.stages.liveness import schedule_liveness_verification
 from pipeline.stages.overall_scorer import score_overall
+from pipeline.stages.skill_gap import maybe_generate_skill_gap_reports
 from pipeline.stages.visa_scorer import score_visa
 
 log = logging.getLogger(__name__)
 
 ScoredJobDict = dict[str, Any]
+
+
+class PipelineAlreadyRunningError(Exception):
+    """Raised when today's pipeline run is already in progress."""
+
+
+def start_pipeline_run(session: Session) -> PipelineRun:
+    """Create or reset today's run record before execution begins."""
+    run_date = date.today()
+    run = session.query(PipelineRun).filter_by(run_date=run_date).first()
+    if run is not None and run.status == "running" and run.completed_at is None:
+        raise PipelineAlreadyRunningError()
+    if run is None:
+        run = PipelineRun(
+            run_date=run_date,
+            started_at=datetime.now(timezone.utc),
+            status="running",
+        )
+        session.add(run)
+    else:
+        run.started_at = datetime.now(timezone.utc)
+        run.status = "running"
+        run.completed_at = None
+        run.error_stage = None
+        run.error_message = None
+    session.commit()
+    return run
 
 
 class NightlyPipeline:
@@ -88,6 +117,8 @@ class NightlyPipeline:
             self.run.jobs_scored = total_scored
             self.run.top_opportunities = total_top
 
+            schedule_liveness_verification(self.session)
+
             if universe_jobs:
                 self._run_stage(
                     "company_universe",
@@ -99,6 +130,11 @@ class NightlyPipeline:
                     "digest",
                     lambda u=user: self._generate_digest(u, jobs),
                 )
+
+            self._run_stage(
+                "skill_gap",
+                lambda: maybe_generate_skill_gap_reports(self.session, self.users),
+            )
 
             self.run.status = "partial" if self._errors else "success"
         except Exception as exc:

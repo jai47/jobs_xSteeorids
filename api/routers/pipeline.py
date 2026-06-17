@@ -7,10 +7,12 @@ from typing import Annotated
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
-from api.deps import get_current_user, get_db
-from api.schemas.pipeline import PipelineRunListResponse, PipelineRunResponse
-from db.models import PipelineRun, User
-from pipeline.pipeline import run_nightly_pipeline
+from api.deps import APIError, get_current_user, get_db
+from api.schemas.pipeline import LLMUsageResponse, PipelineRunListResponse, PipelineRunResponse
+from db.models import LLMUsage, PipelineRun, User
+from pipeline.pipeline import PipelineAlreadyRunningError, start_pipeline_run
+from pipeline.runner import PipelineAlreadyRunningError as BackgroundPipelineRunningError
+from pipeline.runner import schedule_pipeline_run
 
 router = APIRouter(prefix="/pipeline", tags=["pipeline"])
 
@@ -46,6 +48,41 @@ def trigger_pipeline_run(
     _user: Annotated[User, Depends(get_current_user)],
     db: Annotated[Session, Depends(get_db)],
 ) -> PipelineRunResponse:
-    """Manually trigger the nightly pipeline."""
-    run = run_nightly_pipeline(db)
+    """Manually trigger the nightly pipeline (runs in background)."""
+    try:
+        run = start_pipeline_run(db)
+        schedule_pipeline_run()
+    except (PipelineAlreadyRunningError, BackgroundPipelineRunningError):
+        raise APIError(409, "Pipeline is already running", "PIPELINE_RUNNING") from None
     return _run_response(run)
+
+
+def _estimate_cost_usd(provider: str, prompt_tokens: int, completion_tokens: int) -> float:
+    """Rough per-call cost estimate for dashboard display."""
+    rates = {
+        "anthropic": (3.0 / 1_000_000, 15.0 / 1_000_000),
+        "openai": (2.5 / 1_000_000, 10.0 / 1_000_000),
+    }
+    input_rate, output_rate = rates.get(provider, (3.0 / 1_000_000, 15.0 / 1_000_000))
+    return prompt_tokens * input_rate + completion_tokens * output_rate
+
+
+@router.get("/llm-usage", response_model=LLMUsageResponse)
+def get_llm_usage(
+    _user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> LLMUsageResponse:
+    """Return aggregate LLM usage and estimated cost."""
+    rows = db.query(LLMUsage).all()
+    total_prompt = sum(row.prompt_tokens or 0 for row in rows)
+    total_completion = sum(row.completion_tokens or 0 for row in rows)
+    estimated = sum(
+        _estimate_cost_usd(row.provider or "", row.prompt_tokens or 0, row.completion_tokens or 0)
+        for row in rows
+    )
+    return LLMUsageResponse(
+        total_calls=len(rows),
+        total_prompt_tokens=total_prompt,
+        total_completion_tokens=total_completion,
+        estimated_cost_usd=round(estimated, 4),
+    )

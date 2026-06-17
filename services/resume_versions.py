@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 import uuid
-from io import BytesIO
 
 import markdown
-import weasyprint
 from sqlalchemy.orm import Session
 
 from api.deps import APIError
@@ -57,6 +55,15 @@ def generate_resume_pdf(session: Session, user: User, version_id: uuid.UUID) -> 
         raise APIError(404, "Resume version not found", "NOT_FOUND")
     if not version.tailored_markdown:
         raise APIError(404, "No tailored content available", "NOT_FOUND")
+
+    try:
+        import weasyprint
+    except OSError as exc:
+        raise APIError(
+            500,
+            "PDF generation is unavailable in this environment",
+            "INTERNAL_ERROR",
+        ) from exc
 
     html = markdown.markdown(version.tailored_markdown)
     pdf_bytes = weasyprint.HTML(string=html).write_pdf()

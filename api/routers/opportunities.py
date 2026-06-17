@@ -46,6 +46,7 @@ def _summary(opp: ScoredOpportunity, job: Job) -> OpportunitySummary:
         digest_date=opp.digest_date,
         created_at=opp.created_at,
         url=job.url,
+        is_stale=bool(job.is_stale),
     )
 
 
@@ -107,8 +108,6 @@ def get_opportunity(
     db: Annotated[Session, Depends(get_db)],
 ) -> OpportunityDetail:
     """Return full opportunity detail including job description."""
-    rows, _total = list_opportunities(db, user, page=1, page_size=1)
-    del rows
     from services.opportunity_actions import _get_opportunity_for_user
 
     opp, job = _get_opportunity_for_user(db, user, opportunity_id)
@@ -121,7 +120,7 @@ def approve(
     user: Annotated[User, Depends(get_current_user)],
     db: Annotated[Session, Depends(get_db)],
 ) -> OpportunityActionResponse:
-    """Approve an opportunity and create an application (tailoring in Phase 13)."""
+    """Approve an opportunity: tailor resume, create application."""
     opp, application = approve_opportunity(db, user, opportunity_id)
     return OpportunityActionResponse(
         id=str(opp.id),
