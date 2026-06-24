@@ -23,11 +23,19 @@ class Settings(BaseSettings):
 
     anthropic_api_key: str = ""
     openai_api_key: str = ""
+    opencode_api_key: str = ""
+    opencode_model: str = "mimo-v2.5-free"
+    opencode_base_url: str = "https://opencode.ai/zen/v1"
+    local_llm_base_url: str = ""
+    local_llm_model: str = "llama3.2"
+    local_llm_api_key: str = "ollama"
+    # auto = try LLM providers then heuristic; llm = LLM only; heuristic = free local parsing
+    resume_parser_mode: str = "auto"
     dashboard_secret: str = "changeme"
 
     log_level: str = "INFO"
     pipeline_cron_hour: int = 2
-    resume_storage_path: str = "/app/resumes"
+    resume_storage_path: str = str(_REPO_ROOT / "resumes")
 
     seed_user_name: str = "Admin"
     seed_user_email: str = ""

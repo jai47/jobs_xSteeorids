@@ -4,7 +4,14 @@ from __future__ import annotations
 
 from datetime import date, datetime
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+
+
+class PipelineProgressEntry(BaseModel):
+    ts: str
+    stage: str
+    level: str = "info"
+    message: str
 
 
 class PipelineRunResponse(BaseModel):
@@ -19,6 +26,8 @@ class PipelineRunResponse(BaseModel):
     top_opportunities: int
     error_stage: str | None
     error_message: str | None
+    current_stage: str | None = None
+    progress_log: list[PipelineProgressEntry] = Field(default_factory=list)
 
 
 class PipelineRunListResponse(BaseModel):

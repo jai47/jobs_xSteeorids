@@ -179,6 +179,8 @@ class PipelineRun(Base):
     top_opportunities = Column(Integer, default=0)
     error_stage = Column(String)
     error_message = Column(Text)
+    current_stage = Column(String)
+    progress_log = Column(JSON, default=list)
 
 
 class LLMUsage(Base):

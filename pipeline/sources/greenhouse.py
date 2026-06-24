@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import List
+from typing import Callable, List
 
 from core.http import HTTPFetchError, fetch_json, get_async_client
 from core.text import (
@@ -30,11 +30,17 @@ class GreenhouseSource(BaseSource):
     source_name = "greenhouse"
     seed_filename = "greenhouse_boards.txt"
 
-    async def fetch(self) -> List[JobDict]:
+    async def fetch(
+        self,
+        progress_callback: Callable[[str], None] | None = None,
+    ) -> List[JobDict]:
         seeds = self.load_seeds()
         jobs: list[JobDict] = []
+        total = len(seeds)
         async with get_async_client() as client:
-            for board in seeds:
+            for index, board in enumerate(seeds, start=1):
+                if progress_callback:
+                    progress_callback(f"greenhouse [{index}/{total}] {board}")
                 try:
                     board_jobs = await self._fetch_board(client, board)
                     jobs.extend(board_jobs)

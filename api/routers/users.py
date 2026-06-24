@@ -12,13 +12,14 @@ from api.schemas.user import (
     BlacklistResponse,
     BlacklistUpdate,
     LLMStatusResponse,
+    ResumeTextUpload,
     ResumeUploadResponse,
     UserProfileResponse,
     UserProfileUpdate,
 )
 from config import settings
 from db.models import User
-from services.onboarding import upload_master_resume, user_has_active_resume
+from services.onboarding import save_master_resume_text, upload_master_resume, user_has_active_resume
 
 router = APIRouter(tags=["users"])
 
@@ -94,12 +95,40 @@ async def upload_resume(
     )
 
 
+@router.post("/users/me/resume/text", response_model=ResumeUploadResponse)
+def upload_resume_text(
+    payload: ResumeTextUpload,
+    user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> ResumeUploadResponse:
+    """Parse pasted resume text with the LLM (bypasses browser file upload)."""
+    try:
+        master_resume, parsed = save_master_resume_text(db, user, payload.text)
+    except ValueError as exc:
+        raise APIError(422, str(exc), "VALIDATION_ERROR") from exc
+
+    return ResumeUploadResponse(
+        master_resume_id=str(master_resume.id),
+        filename=master_resume.filename or "resume.txt",
+        skills=parsed.skills,
+        experience_years=parsed.experience_years,
+        previous_titles=parsed.previous_titles,
+        education=parsed.education,
+        languages=parsed.languages,
+    )
+
+
 @router.get("/config/llm-status", response_model=LLMStatusResponse)
 def llm_status() -> LLMStatusResponse:
     """Report whether LLM API keys are configured (values are never returned)."""
     return LLMStatusResponse(
         anthropic_configured=bool(settings.anthropic_api_key),
         openai_configured=bool(settings.openai_api_key),
+        opencode_configured=bool(settings.opencode_api_key),
+        opencode_model=settings.opencode_model if settings.opencode_api_key else None,
+        local_llm_configured=bool(settings.local_llm_base_url),
+        local_llm_model=settings.local_llm_model if settings.local_llm_base_url else None,
+        resume_parser_mode=settings.resume_parser_mode,
     )
 
 

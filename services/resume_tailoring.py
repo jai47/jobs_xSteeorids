@@ -6,6 +6,8 @@ from sqlalchemy.orm import Session
 
 from api.deps import APIError
 from db.models import Job, MasterResume, ResumeVersion, User
+from api.schemas.resume import TailoredResumeOutput
+from llm.client import LLMError
 from llm.resume_tailor import tailor_resume_for_job
 
 
@@ -33,12 +35,26 @@ def create_tailored_resume_version(
     master: MasterResume,
 ) -> ResumeVersion:
     """Run LLM tailoring and persist a resume_versions row."""
-    output = tailor_resume_for_job(
-        master.raw_text or "",
-        job.description or "",
-        user.id,
-        session,
-    )
+    try:
+        output = tailor_resume_for_job(
+            master.raw_text or "",
+            job.description or "",
+            user.id,
+            session,
+        )
+    except LLMError:
+        output = TailoredResumeOutput(
+            tailored_markdown=(
+                f"# Tailored resume (LLM unavailable)\n\n"
+                f"**Role:** {job.title} @ {job.company}\n\n"
+                f"---\n\n{master.raw_text or ''}"
+            ),
+            json_resume={},
+            ats_score_before=0,
+            ats_score_after=0,
+            keywords_added=[],
+            skill_gaps=["LLM tailoring unavailable — using master resume copy"],
+        )
     version = ResumeVersion(
         job_id=job.id,
         user_id=user.id,

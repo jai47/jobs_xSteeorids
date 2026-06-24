@@ -11,12 +11,14 @@ from api.deps import APIError, get_current_user, get_db
 from api.schemas.pipeline import LLMUsageResponse, PipelineRunListResponse, PipelineRunResponse
 from db.models import LLMUsage, PipelineRun, User
 from pipeline.pipeline import PipelineAlreadyRunningError, start_pipeline_run
+from pipeline.progress import STAGE_LABELS
 from pipeline.runner import schedule_pipeline_run
 
 router = APIRouter(prefix="/pipeline", tags=["pipeline"])
 
 
 def _run_response(run: PipelineRun) -> PipelineRunResponse:
+    logs = run.progress_log or []
     return PipelineRunResponse(
         id=str(run.id),
         run_date=run.run_date,
@@ -29,6 +31,8 @@ def _run_response(run: PipelineRun) -> PipelineRunResponse:
         top_opportunities=run.top_opportunities or 0,
         error_stage=run.error_stage,
         error_message=run.error_message,
+        current_stage=run.current_stage,
+        progress_log=logs,
     )
 
 
@@ -56,11 +60,18 @@ def trigger_pipeline_run(
     return _run_response(run)
 
 
+@router.get("/stages")
+def list_pipeline_stages() -> dict[str, str]:
+    """Return human-readable labels for pipeline stages."""
+    return STAGE_LABELS
+
+
 def _estimate_cost_usd(provider: str, prompt_tokens: int, completion_tokens: int) -> float:
     """Rough per-call cost estimate for dashboard display."""
     rates = {
         "anthropic": (3.0 / 1_000_000, 15.0 / 1_000_000),
         "openai": (2.5 / 1_000_000, 10.0 / 1_000_000),
+        "opencode": (2.5 / 1_000_000, 10.0 / 1_000_000),
     }
     input_rate, output_rate = rates.get(provider, (3.0 / 1_000_000, 15.0 / 1_000_000))
     return prompt_tokens * input_rate + completion_tokens * output_rate

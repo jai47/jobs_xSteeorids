@@ -20,7 +20,7 @@ PIPELINE SUMMARY
   Jobs scanned:          {discovered}
   After deduplication:   {after_dedup}
   Scored:                {scored}
-  Opportunities (≥70):   {top_count}
+  Opportunities (≥{min_score}):   {top_count}
 
 TRENDING COMPANIES THIS WEEK
 {trending_companies}
@@ -38,7 +38,7 @@ TOP RECOMMENDATION
     • {top_fit_reasoning}
     • {top_visa_reasoning}
 
-TOP OPPORTUNITIES (score ≥ 70)
+TOP OPPORTUNITIES (score ≥ {min_score})
 {opportunities_table}
 """.strip()
 
@@ -94,12 +94,7 @@ def build_digest_content(
 ) -> str:
     """Render digest text from pipeline metrics and scored opportunities."""
     digest_eligible = [opp for opp in opportunities if opp.get("overall_score", 0) >= DIGEST_MIN_SCORE]
-    optional = [
-        opp
-        for opp in opportunities
-        if 60 <= opp.get("overall_score", 0) < DIGEST_MIN_SCORE
-    ]
-    display_opps = digest_eligible + optional
+    display_opps = digest_eligible
     top = max(opportunities, key=lambda item: item.get("overall_score", 0), default=None)
 
     if top is None:
@@ -133,6 +128,7 @@ def build_digest_content(
 
     return DIGEST_TEMPLATE.format(
         date=digest_date.isoformat(),
+        min_score=int(DIGEST_MIN_SCORE),
         discovered=metrics.get("discovered", 0),
         after_dedup=metrics.get("after_dedup", 0),
         scored=metrics.get("scored", 0),
@@ -195,7 +191,7 @@ def generate_digest_for_user(
         user,
         digest_date,
         content,
-        {**metrics, "top_count": len([o for o in opportunities if o.get("overall_score", 0) >= 70])},
+        {**metrics, "top_count": len([o for o in opportunities if o.get("overall_score", 0) >= DIGEST_MIN_SCORE])},
     )
 
 

@@ -47,6 +47,15 @@ class UserProfileUpdate(BaseModel):
 class LLMStatusResponse(BaseModel):
     anthropic_configured: bool
     openai_configured: bool
+    opencode_configured: bool
+    opencode_model: str | None = None
+    local_llm_configured: bool
+    local_llm_model: str | None = None
+    resume_parser_mode: str
+
+
+class ResumeTextUpload(BaseModel):
+    text: str = Field(min_length=1)
 
 
 class ResumeUploadResponse(BaseModel):

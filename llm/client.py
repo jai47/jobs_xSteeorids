@@ -1,7 +1,7 @@
 """
 Single abstraction for all LLM calls.
 Primary: Anthropic Claude claude-sonnet-4-20250514
-Fallback: OpenAI GPT-4o after 3 failed Anthropic retries
+Fallback: OpenCode Zen (OpenAI-compatible), then OpenAI GPT-4o
 """
 
 from __future__ import annotations
@@ -47,6 +47,50 @@ def _log_usage(
     session.flush()
 
 
+def _call_openai_compatible(
+    *,
+    api_key: str,
+    base_url: str | None,
+    model: str,
+    provider: str,
+    prompt: str,
+    purpose: str,
+    user_id: uuid.UUID,
+    session: Session,
+    max_tokens: int,
+) -> str:
+    """Call an OpenAI-compatible chat completions endpoint."""
+    client_kwargs: dict[str, str] = {"api_key": api_key}
+    if base_url:
+        client_kwargs["base_url"] = base_url
+    client = openai.OpenAI(**client_kwargs)
+    response = client.chat.completions.create(
+        model=model,
+        max_tokens=max_tokens,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    text = response.choices[0].message.content or ""
+    usage = response.usage
+    _log_usage(
+        session,
+        user_id,
+        provider,
+        model,
+        purpose,
+        usage.prompt_tokens if usage else 0,
+        usage.completion_tokens if usage else 0,
+    )
+    return text
+
+
+def _provider_error(provider: str, exc: Exception) -> str:
+    """Format a provider failure for user-facing errors."""
+    message = str(exc).strip()
+    if len(message) > 240:
+        message = message[:237] + "..."
+    return f"{provider}: {message}"
+
+
 def call_llm(
     prompt: str,
     purpose: str,
@@ -55,6 +99,8 @@ def call_llm(
     max_tokens: int = 2000,
 ) -> str:
     """Return raw LLM text. Raises LLMError after all retries."""
+    failures: list[str] = []
+
     if settings.anthropic_api_key:
         for attempt in range(3):
             try:
@@ -82,33 +128,65 @@ def call_llm(
                     exc,
                 )
                 if attempt == 2:
-                    break
+                    failures.append(_provider_error("Anthropic", exc))
+
+    if settings.opencode_api_key:
+        try:
+            return _call_openai_compatible(
+                api_key=settings.opencode_api_key,
+                base_url=settings.opencode_base_url,
+                model=settings.opencode_model,
+                provider="opencode",
+                prompt=prompt,
+                purpose=purpose,
+                user_id=user_id,
+                session=session,
+                max_tokens=max_tokens,
+            )
+        except Exception as exc:
+            log.error("OpenCode call failed: %s", exc)
+            failures.append(_provider_error("OpenCode Zen", exc))
+
+    if settings.local_llm_base_url:
+        try:
+            return _call_openai_compatible(
+                api_key=settings.local_llm_api_key or "ollama",
+                base_url=settings.local_llm_base_url,
+                model=settings.local_llm_model,
+                provider="local",
+                prompt=prompt,
+                purpose=purpose,
+                user_id=user_id,
+                session=session,
+                max_tokens=max_tokens,
+            )
+        except Exception as exc:
+            log.error("Local LLM call failed: %s", exc)
+            failures.append(_provider_error("Local LLM", exc))
 
     if settings.openai_api_key:
         try:
-            client = openai.OpenAI(api_key=settings.openai_api_key)
-            response = client.chat.completions.create(
+            return _call_openai_compatible(
+                api_key=settings.openai_api_key,
+                base_url=None,
                 model=OPENAI_MODEL,
+                provider="openai",
+                prompt=prompt,
+                purpose=purpose,
+                user_id=user_id,
+                session=session,
                 max_tokens=max_tokens,
-                messages=[{"role": "user", "content": prompt}],
             )
-            text = response.choices[0].message.content or ""
-            usage = response.usage
-            _log_usage(
-                session,
-                user_id,
-                "openai",
-                OPENAI_MODEL,
-                purpose,
-                usage.prompt_tokens if usage else 0,
-                usage.completion_tokens if usage else 0,
-            )
-            return text
         except Exception as exc:
             log.error("OpenAI fallback failed: %s", exc)
-            raise LLMError("LLM providers unavailable") from exc
+            failures.append(_provider_error("OpenAI", exc))
 
-    raise LLMError("No LLM API keys configured")
+    if failures:
+        raise LLMError("LLM providers unavailable — " + "; ".join(failures))
+
+    raise LLMError(
+        "No LLM API keys configured. Set OPENCODE_API_KEY and/or ANTHROPIC_API_KEY in .env."
+    )
 
 
 def parse_llm_json(raw: str) -> dict:

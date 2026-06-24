@@ -1,4 +1,4 @@
-"""Resume parsing via a single LLM call."""
+"""Resume parsing via LLM with optional free heuristic fallback."""
 
 from __future__ import annotations
 
@@ -8,7 +8,9 @@ import uuid
 from sqlalchemy.orm import Session
 
 from api.schemas.resume import ParsedResumeOutput
+from config import settings
 from llm.client import LLMError, call_llm, parse_llm_json
+from llm.resume_parser_heuristic import parse_resume_heuristic
 
 log = logging.getLogger(__name__)
 
@@ -40,7 +42,27 @@ def parse_resume_with_llm(
     session: Session,
 ) -> ParsedResumeOutput:
     """Extract structured profile fields from resume text."""
+    mode = (settings.resume_parser_mode or "auto").lower()
+    if mode == "heuristic":
+        parsed = parse_resume_heuristic(resume_text)
+        log.info("Resume parsed with heuristic mode (no LLM)")
+        return parsed
+
     prompt = RESUME_PARSE_PROMPT.format(resume_text=resume_text[:12000])
+    try:
+        return _parse_with_llm(prompt, user_id, session)
+    except LLMError as exc:
+        if mode == "llm":
+            raise
+        log.warning("LLM resume parse failed, using heuristic fallback: %s", exc)
+        return parse_resume_heuristic(resume_text)
+
+
+def _parse_with_llm(
+    prompt: str,
+    user_id: uuid.UUID,
+    session: Session,
+) -> ParsedResumeOutput:
     raw = call_llm(prompt, "resume_parsing", user_id, session)
 
     try:

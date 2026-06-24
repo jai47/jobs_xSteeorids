@@ -13,6 +13,7 @@ from typing import Any, Callable
 from sqlalchemy.orm import Session
 
 from db.models import Job, PipelineRun, ScoredOpportunity, User
+from pipeline.progress import append_progress, reset_progress
 from pipeline.sources.base import JobDict
 from pipeline.sources.registry import fetch_all_sources_sync
 from pipeline.stages.blacklist import apply_blacklist
@@ -22,8 +23,10 @@ from pipeline.stages.digest import generate_digest_for_user
 from pipeline.stages.fit_scorer import score_fit
 from pipeline.stages.liveness import schedule_liveness_verification
 from pipeline.stages.overall_scorer import score_overall
+from pipeline.stages.overall_scorer import DIGEST_MIN_SCORE
 from pipeline.stages.skill_gap import maybe_generate_skill_gap_reports
 from pipeline.stages.visa_scorer import score_visa
+from services.onboarding import sync_user_skills_from_resume, user_has_active_resume
 
 log = logging.getLogger(__name__)
 
@@ -36,10 +39,20 @@ class PipelineAlreadyRunningError(Exception):
 
 def start_pipeline_run(session: Session) -> PipelineRun:
     """Create or reset today's run record before execution begins."""
+    from pipeline.runner import is_background_pipeline_running
+
     run_date = date.today()
     run = session.query(PipelineRun).filter_by(run_date=run_date).first()
     if run is not None and run.status == "running" and run.completed_at is None:
-        raise PipelineAlreadyRunningError()
+        if is_background_pipeline_running():
+            raise PipelineAlreadyRunningError()
+        log.warning("Recovering stale pipeline run for %s", run_date)
+        run.status = "failed"
+        run.completed_at = datetime.now(timezone.utc)
+        if not run.error_message:
+            run.error_message = "Run interrupted before completion"
+        session.flush()
+
     if run is None:
         run = PipelineRun(
             run_date=run_date,
@@ -53,6 +66,8 @@ def start_pipeline_run(session: Session) -> PipelineRun:
         run.completed_at = None
         run.error_stage = None
         run.error_message = None
+        run.current_stage = None
+        run.progress_log = []
     session.commit()
     return run
 
@@ -91,32 +106,75 @@ class NightlyPipeline:
             self.run.status = "running"
             self.run.error_stage = None
             self.run.error_message = None
-        self.session.commit()
+        reset_progress(self.session, self.run)
+        append_progress(self.session, self.run, stage="starting", message="Pipeline run started")
 
         jobs: list[JobDict] = []
         try:
             jobs = self._run_stage("discover", self._discover)
             self.run.jobs_discovered = len(jobs)
+            self.session.commit()
+            append_progress(
+                self.session,
+                self.run,
+                stage="discover",
+                message=f"Discovered {len(jobs)} jobs from job boards",
+            )
 
             jobs = self._run_stage("deduplicate", lambda: self._deduplicate(jobs))
             self.run.jobs_after_dedup = len(jobs)
+            self.session.commit()
+            append_progress(
+                self.session,
+                self.run,
+                stage="deduplicate",
+                message=f"{len(jobs)} jobs after deduplication",
+            )
 
             self._run_stage("store_jobs", lambda: self._store_jobs(jobs))
+            append_progress(
+                self.session,
+                self.run,
+                stage="store_jobs",
+                message=f"Stored {len(jobs)} jobs in database",
+            )
 
             total_scored = 0
             total_top = 0
             universe_jobs: list[ScoredJobDict] = []
 
             for user in self.users:
+                append_progress(
+                    self.session,
+                    self.run,
+                    stage="score",
+                    message=f"Scoring jobs for {user.email}...",
+                )
                 user_opps, scored_count, top_count = self._score_for_user(jobs, user)
                 total_scored += scored_count
                 total_top += top_count
                 if user_opps:
                     universe_jobs.extend(user_opps)
+                append_progress(
+                    self.session,
+                    self.run,
+                    stage="score",
+                    message=(
+                        f"Scored {scored_count} jobs for {user.email} "
+                        f"({top_count} with score ≥ {int(DIGEST_MIN_SCORE)})"
+                    ),
+                )
 
             self.run.jobs_scored = total_scored
             self.run.top_opportunities = total_top
+            self.session.commit()
 
+            append_progress(
+                self.session,
+                self.run,
+                stage="liveness",
+                message="Scheduling background liveness checks on job URLs...",
+            )
             schedule_liveness_verification(self.session)
 
             if universe_jobs:
@@ -126,6 +184,12 @@ class NightlyPipeline:
                 )
 
             for user in self.users:
+                append_progress(
+                    self.session,
+                    self.run,
+                    stage="digest",
+                    message=f"Generating daily digest for {user.email}...",
+                )
                 self._run_stage(
                     "digest",
                     lambda u=user: self._generate_digest(u, jobs),
@@ -137,10 +201,23 @@ class NightlyPipeline:
             )
 
             self.run.status = "partial" if self._errors else "success"
+            append_progress(
+                self.session,
+                self.run,
+                stage="complete",
+                message=f"Pipeline finished with status: {self.run.status}",
+            )
         except Exception as exc:
             log.exception("Pipeline failed")
             self.run.status = "failed"
             self.run.error_message = str(exc)
+            append_progress(
+                self.session,
+                self.run,
+                stage="complete",
+                message=f"Pipeline failed: {exc}",
+                level="error",
+            )
         finally:
             self.run.completed_at = datetime.now(timezone.utc)
             if self._errors and self.run.status != "failed":
@@ -151,6 +228,13 @@ class NightlyPipeline:
 
     def _run_stage(self, stage: str, fn: Callable[[], Any]) -> Any:
         """Run a stage with fail-soft error handling."""
+        if self.run is not None:
+            append_progress(
+                self.session,
+                self.run,
+                stage=stage,
+                message=f"Starting {stage}...",
+            )
         try:
             return fn()
         except Exception as exc:
@@ -159,9 +243,22 @@ class NightlyPipeline:
             self._errors.append(message)
             if self.run is not None:
                 self.run.error_stage = stage
+                append_progress(
+                    self.session,
+                    self.run,
+                    stage=stage,
+                    message=message,
+                    level="error",
+                )
             return None
 
     def _discover(self) -> list[JobDict]:
+        def on_progress(message: str) -> None:
+            if self.run is not None:
+                append_progress(self.session, self.run, stage="discover", message=message)
+
+        if self.fetch_fn is fetch_all_sources_sync:
+            return fetch_all_sources_sync(progress_callback=on_progress)
         return self.fetch_fn()
 
     def _deduplicate(self, jobs: list[JobDict]) -> list[JobDict]:
@@ -215,9 +312,16 @@ class NightlyPipeline:
         user: User,
     ) -> tuple[list[ScoredJobDict], int, int]:
         """Score jobs for one user and persist opportunities."""
-        if not user.parsed_skills:
-            log.warning("Skipping scoring for user %s: no parsed skills", user.email)
+        if not user_has_active_resume(self.session, user.id):
+            log.warning("Skipping scoring for user %s: no active resume", user.email)
             return [], 0, 0
+
+        sync_user_skills_from_resume(self.session, user)
+        if not user.parsed_skills:
+            log.warning(
+                "Scoring user %s with no parsed skills — fit scores may be low",
+                user.email,
+            )
 
         user_jobs = apply_blacklist(jobs, user)
         scored_opportunities: list[ScoredJobDict] = []
@@ -252,7 +356,7 @@ class NightlyPipeline:
                 self.session.add(self._new_opportunity(job_row.id, user.id, digest_date, scored))
 
             scored_opportunities.append(scored)
-            if scored.get("overall_score", 0) >= 70:
+            if scored.get("overall_score", 0) >= DIGEST_MIN_SCORE:
                 top_count += 1
 
         self.session.flush()
