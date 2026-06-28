@@ -37,10 +37,6 @@ class Settings(BaseSettings):
     pipeline_cron_hour: int = 2
     resume_storage_path: str = str(_REPO_ROOT / "resumes")
 
-    seed_user_name: str = "Admin"
-    seed_user_email: str = ""
-    seed_user_password: str = ""
-
     @property
     def database_url(self) -> str:
         return (

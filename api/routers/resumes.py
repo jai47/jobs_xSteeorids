@@ -28,6 +28,11 @@ class ResumeVersionItem(BaseModel):
     skill_gaps: list[str] = Field(default_factory=list)
     master_text: str = ""
     tailored_markdown: str = ""
+    latex_source: str = ""
+    ai_tailored: bool = False
+    ai_latex: bool = False
+    pdf_engine: str = "html"
+    has_latex_pdf: bool = False
     created_at: Any = None
 
 
@@ -51,7 +56,7 @@ def download_resume_pdf(
     user: Annotated[User, Depends(get_current_user)],
     db: Annotated[Session, Depends(get_db)],
 ) -> Response:
-    """Generate and download a tailored resume PDF on demand."""
+    """Generate and download a single-page LaTeX resume PDF on demand."""
     pdf_bytes = generate_resume_pdf(db, user, version_id)
     return Response(
         content=pdf_bytes,

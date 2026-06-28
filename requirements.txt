@@ -11,6 +11,7 @@ rapidfuzz==3.9.0
 pdfminer.six==20221105
 python-docx==1.1.2
 weasyprint==61.2
+xhtml2pdf==0.2.16
 anthropic==0.28.0
 openai==1.30.0
 apscheduler==3.10.4

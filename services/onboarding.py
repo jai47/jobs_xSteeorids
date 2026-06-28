@@ -6,7 +6,6 @@ import uuid
 from io import BytesIO
 from pathlib import Path
 
-import bcrypt
 from docx import Document
 from pdfminer.high_level import extract_text as pdf_extract_text
 from sqlalchemy import select
@@ -19,30 +18,6 @@ from llm.resume_parser import parse_resume_with_llm
 from llm.resume_parser_heuristic import parse_resume_heuristic
 
 ALLOWED_EXTENSIONS = {".pdf", ".docx"}
-
-
-def ensure_seed_user(session: Session) -> User | None:
-    """Create the initial dashboard user from env vars when the table is empty."""
-    existing = session.scalar(select(User).limit(1))
-    if existing is not None:
-        return None
-
-    if not settings.seed_user_email or not settings.seed_user_password:
-        return None
-
-    password_hash = bcrypt.hashpw(
-        settings.seed_user_password.encode(),
-        bcrypt.gensalt(),
-    ).decode()
-    user = User(
-        name=settings.seed_user_name,
-        email=settings.seed_user_email.lower(),
-        dashboard_password=password_hash,
-    )
-    session.add(user)
-    session.flush()
-    return user
-
 
 def extract_resume_text(content: bytes, filename: str) -> str:
     """Extract plain text from a PDF or DOCX resume."""

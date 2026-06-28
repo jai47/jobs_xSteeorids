@@ -154,7 +154,11 @@ class NightlyPipeline:
                 total_scored += scored_count
                 total_top += top_count
                 if user_opps:
-                    universe_jobs.extend(user_opps)
+                    universe_jobs.extend(
+                        opp
+                        for opp in user_opps
+                        if opp.get("overall_score", 0) >= DIGEST_MIN_SCORE
+                    )
                 append_progress(
                     self.session,
                     self.run,

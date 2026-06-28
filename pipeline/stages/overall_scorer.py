@@ -15,7 +15,7 @@ class OverallScoreResult(TypedDict):
     classification: str
 
 
-DIGEST_MIN_SCORE = 30.0
+DIGEST_MIN_SCORE = 50.0
 
 
 def score_overall(fit_result: dict, visa_result: dict) -> OverallScoreResult:

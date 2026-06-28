@@ -144,6 +144,7 @@ class ResumeVersion(Base):
     keywords_added = Column(ARRAY(String))
     skill_gaps = Column(ARRAY(String))
     tailored_markdown = Column(Text)
+    latex_source = Column(Text)
     pdf_path = Column(String)
     json_resume = Column(JSON)
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow)

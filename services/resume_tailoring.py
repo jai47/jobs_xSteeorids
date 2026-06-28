@@ -9,6 +9,8 @@ from db.models import Job, MasterResume, ResumeVersion, User
 from api.schemas.resume import TailoredResumeOutput
 from llm.client import LLMError
 from llm.resume_tailor import tailor_resume_for_job
+from services.resume_formatter import format_tailored_markdown
+from services.resume_versions import ensure_latex_source
 
 
 def get_active_master_resume(session: Session, user: User) -> MasterResume:
@@ -35,6 +37,7 @@ def create_tailored_resume_version(
     master: MasterResume,
 ) -> ResumeVersion:
     """Run LLM tailoring and persist a resume_versions row."""
+    ai_tailored = False
     try:
         output = tailor_resume_for_job(
             master.raw_text or "",
@@ -42,18 +45,21 @@ def create_tailored_resume_version(
             user.id,
             session,
         )
+        ai_tailored = True
     except LLMError:
+        tailored_md = format_tailored_markdown(
+            master.raw_text or "",
+            job_title=job.title,
+            company=job.company,
+            ai_tailored=False,
+        )
         output = TailoredResumeOutput(
-            tailored_markdown=(
-                f"# Tailored resume (LLM unavailable)\n\n"
-                f"**Role:** {job.title} @ {job.company}\n\n"
-                f"---\n\n{master.raw_text or ''}"
-            ),
+            tailored_markdown=tailored_md,
             json_resume={},
             ats_score_before=0,
             ats_score_after=0,
             keywords_added=[],
-            skill_gaps=["LLM tailoring unavailable — using master resume copy"],
+            skill_gaps=["LLM not configured — resume formatted locally (not AI-rewritten)"],
         )
     version = ResumeVersion(
         job_id=job.id,
@@ -68,4 +74,5 @@ def create_tailored_resume_version(
     )
     session.add(version)
     session.flush()
+    ensure_latex_source(session, version, job, force=not ai_tailored)
     return version
