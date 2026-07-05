@@ -16,6 +16,8 @@ async def lifespan(app: FastAPI):
     shutdown_scheduler()
 
 
+settings.assert_safe_for_production()
+
 app = FastAPI(title="AI Career Copilot API", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,

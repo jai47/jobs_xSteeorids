@@ -33,10 +33,20 @@ class Settings(BaseSettings):
     resume_parser_mode: str = "auto"
     dashboard_secret: str = "changeme"
 
+    # development | production — gates default-secret enforcement and error detail exposure.
+    app_env: str = "development"
+
     log_level: str = "INFO"
     pipeline_cron_hour: int = 2
     resume_storage_path: str = str(_REPO_ROOT / "resumes")
     cors_origins: str = "http://localhost:3000,http://localhost:5173"
+
+    email_provider: str = "console"
+    resend_api_key: str = ""
+    email_from_address: str = "copilot@localhost"
+    app_base_url: str = "http://localhost:5173"
+    api_base_url: str = "http://localhost:8000"
+    notification_drain_interval_min: int = 15
 
     @property
     def cors_origins_list(self) -> list[str]:
@@ -48,6 +58,25 @@ class Settings(BaseSettings):
             f"postgresql+psycopg2://{self.db_user}:{self.db_password}"
             f"@{self.db_host}:{self.db_port}/{self.db_name}"
         )
+
+    @property
+    def is_production(self) -> bool:
+        return self.app_env.strip().lower() == "production"
+
+    def assert_safe_for_production(self) -> None:
+        """Refuse to boot in production with insecure default secrets."""
+        if not self.is_production:
+            return
+        insecure = [
+            name
+            for name, value in (("DASHBOARD_SECRET", self.dashboard_secret), ("DB_PASSWORD", self.db_password))
+            if value == "changeme"
+        ]
+        if insecure:
+            raise RuntimeError(
+                "Refusing to start with APP_ENV=production while insecure default value(s) "
+                f"are still set: {', '.join(insecure)}. Set real secrets in the environment/.env file."
+            )
 
 
 settings = Settings()

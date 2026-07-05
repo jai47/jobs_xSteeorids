@@ -27,11 +27,19 @@ _bearer = HTTPBearer(auto_error=False)
 class APIError(HTTPException):
     """HTTP exception with a stable error code for clients."""
 
-    def __init__(self, status_code: int, error: str, code: str, detail: str | None = None) -> None:
+    def __init__(
+        self,
+        status_code: int,
+        error: str,
+        code: str,
+        detail: str | None = None,
+        **extra: Any,
+    ) -> None:
         super().__init__(status_code=status_code, detail=error)
         self.error = error
         self.code = code
         self.extra_detail = detail
+        self.extra_fields = extra
 
 
 class LLMError(Exception):
@@ -151,10 +159,9 @@ def register_exception_handlers(app: FastAPI) -> None:
 
     @app.exception_handler(APIError)
     async def api_error_handler(_request: Request, exc: APIError) -> JSONResponse:
-        return JSONResponse(
-            status_code=exc.status_code,
-            content=_error_body(exc.error, exc.code, exc.extra_detail),
-        )
+        content = _error_body(exc.error, exc.code, exc.extra_detail)
+        content.update(exc.extra_fields)
+        return JSONResponse(status_code=exc.status_code, content=content)
 
     @app.exception_handler(RequestValidationError)
     async def validation_error_handler(
@@ -175,7 +182,8 @@ def register_exception_handlers(app: FastAPI) -> None:
 
     @app.exception_handler(Exception)
     async def internal_error_handler(_request: Request, exc: Exception) -> JSONResponse:
+        detail = None if settings.is_production else str(exc)
         return JSONResponse(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            content=_error_body("Internal server error", "INTERNAL_ERROR", str(exc)),
+            content=_error_body("Internal server error", "INTERNAL_ERROR", detail),
         )

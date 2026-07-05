@@ -18,7 +18,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
 )
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import declarative_base
 
 Base = declarative_base()
@@ -43,6 +43,10 @@ class User(Base):
     blacklisted_companies = Column(ARRAY(String), default=[])
     blacklisted_roles = Column(ARRAY(String), default=[])
     blacklisted_locations = Column(ARRAY(String), default=[])
+    score_warning_threshold = Column(Integer, default=40, nullable=False)
+    cover_letter_angles = Column(JSONB, default=lambda: dict())
+    notify_digest_email = Column(Boolean, default=True, nullable=False)
+    notify_followup_email = Column(Boolean, default=True, nullable=False)
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
 
 
@@ -85,6 +89,18 @@ class Job(Base):
     is_active = Column(Boolean, default=True)
     is_stale = Column(Boolean, default=False)
     last_verified = Column(Date)
+    archetype = Column(String, nullable=True)
+    salary_min = Column(Integer, nullable=True)
+    salary_max = Column(Integer, nullable=True)
+    salary_currency = Column(String(3), nullable=True)
+    salary_period = Column(String, nullable=True)
+    salary_usd_min = Column(Integer, nullable=True)
+    salary_usd_max = Column(Integer, nullable=True)
+    salary_currency_assumed = Column(Boolean, default=False)
+    legitimacy_flags = Column(JSONB, default=list)
+    dedup_fingerprint = Column(String(64), nullable=True, index=True)
+    description_hash = Column(String(32), nullable=True)
+    repost_of_job_id = Column(UUID(as_uuid=True), ForeignKey("jobs.id", ondelete="SET NULL"), nullable=True)
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
 
     __table_args__ = (
@@ -163,6 +179,27 @@ class Application(Base):
     followed_up_at = Column(DateTime(timezone=True))
     second_follow_up_due = Column(Date)
     notes = Column(Text)
+    sub_status = Column(String, nullable=True)
+    updated_at = Column(DateTime(timezone=True), default=datetime.utcnow)
+
+
+class CoverLetter(Base):
+    __tablename__ = "cover_letters"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    application_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("applications.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+    )
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
+    status = Column(String, nullable=False, default="pending")
+    body = Column(Text)
+    generation_count = Column(Integer, default=0)
+    last_error = Column(Text)
+    angles_snapshot = Column(JSONB)
+    created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
     updated_at = Column(DateTime(timezone=True), default=datetime.utcnow)
 
 
@@ -223,3 +260,77 @@ class DailyDigest(Base):
     __table_args__ = (
         UniqueConstraint("user_id", "digest_date", name="uq_user_digest_date"),
     )
+
+
+class FxRate(Base):
+    __tablename__ = "fx_rates"
+
+    currency = Column(String(3), primary_key=True)
+    rate_to_usd = Column(Float, nullable=False)
+    as_of = Column(Date, nullable=False)
+
+
+class Notification(Base):
+    __tablename__ = "notifications"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    type = Column(String, nullable=False)
+    channel = Column(String, nullable=False)
+    payload_json = Column(JSONB, nullable=False)
+    dedupe_key = Column(String, nullable=False, unique=True)
+    status = Column(String, nullable=False, default="pending")
+    attempts = Column(Integer, default=0, nullable=False)
+    scheduled_for = Column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
+    sent_at = Column(DateTime(timezone=True), nullable=True)
+    read_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
+
+
+class StarStory(Base):
+    __tablename__ = "star_stories"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    status = Column(String, nullable=False, default="draft")
+    title = Column(String, nullable=False)
+    tags = Column(ARRAY(String), default=list)
+    situation = Column(Text)
+    task = Column(Text)
+    action = Column(Text)
+    result = Column(Text)
+    reflection = Column(Text)
+    source_job_id = Column(UUID(as_uuid=True), ForeignKey("jobs.id", ondelete="SET NULL"), nullable=True)
+    ai_drafted = Column(Boolean, default=False)
+    created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
+    updated_at = Column(DateTime(timezone=True), default=datetime.utcnow)
+
+
+class ApplicationTheme(Base):
+    __tablename__ = "application_themes"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    application_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("applications.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+    )
+    themes = Column(ARRAY(String), default=list)
+    status = Column(String, nullable=False, default="pending")
+
+
+class ApplicationStageEvent(Base):
+    __tablename__ = "application_stage_events"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    application_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("applications.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    from_status = Column(String, nullable=True)
+    to_status = Column(String, nullable=True)
+    from_sub = Column(String, nullable=True)
+    to_sub = Column(String, nullable=True)
+    occurred_at = Column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)

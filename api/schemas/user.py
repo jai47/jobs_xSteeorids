@@ -41,6 +41,10 @@ class UserProfileResponse(BaseModel):
     years_experience: int | None = None
     parsed_skills: list[str] = Field(default_factory=list)
     has_active_resume: bool = False
+    score_warning_threshold: int = 40
+    cover_letter_angles: dict[str, str] = Field(default_factory=dict)
+    notify_digest_email: bool = True
+    notify_followup_email: bool = True
 
 
 class UserProfileUpdate(BaseModel):
@@ -52,6 +56,10 @@ class UserProfileUpdate(BaseModel):
     salary_range_max: int | None = None
     salary_currency: str | None = None
     years_experience: int | None = None
+    score_warning_threshold: int | None = Field(default=None, ge=0, le=100)
+    cover_letter_angles: dict[str, str] | None = None
+    notify_digest_email: bool | None = None
+    notify_followup_email: bool | None = None
 
 
 class LLMStatusResponse(BaseModel):

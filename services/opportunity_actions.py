@@ -6,6 +6,7 @@ import uuid
 from datetime import date, datetime
 
 from sqlalchemy.orm import Session
+from sqlalchemy import func
 
 from api.deps import APIError
 from db.models import Application, Job, ScoredOpportunity, User
@@ -44,6 +45,9 @@ def list_opportunities(
     visa_status: str | None = None,
     classification: str | None = None,
     min_score: float | None = None,
+    archetype: str | None = None,
+    min_salary_usd: int | None = None,
+    exclude_suspicious: bool = False,
     date_from: date | None = None,
     date_to: date | None = None,
 ) -> tuple[list[tuple[ScoredOpportunity, Job]], int]:
@@ -63,6 +67,12 @@ def list_opportunities(
         query = query.filter(ScoredOpportunity.classification == classification)
     if min_score is not None:
         query = query.filter(ScoredOpportunity.overall_score >= min_score)
+    if archetype:
+        query = query.filter(Job.archetype == archetype)
+    if min_salary_usd is not None:
+        query = query.filter(Job.salary_usd_max >= min_salary_usd)
+    if exclude_suspicious:
+        query = query.filter(func.coalesce(func.jsonb_array_length(Job.legitimacy_flags), 0) == 0)
     if date_from:
         query = query.filter(ScoredOpportunity.digest_date >= date_from)
     if date_to:

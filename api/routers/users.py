@@ -19,6 +19,7 @@ from api.schemas.user import (
 )
 from config import settings
 from db.models import User
+from services.cover_letters import get_user_angles
 from services.onboarding import save_master_resume_text, upload_master_resume, user_has_active_resume
 
 router = APIRouter(tags=["users"])
@@ -39,6 +40,10 @@ def _profile_response(user: User, has_active_resume: bool) -> UserProfileRespons
         years_experience=user.years_experience,
         parsed_skills=list(user.parsed_skills or []),
         has_active_resume=has_active_resume,
+        score_warning_threshold=user.score_warning_threshold or 40,
+        cover_letter_angles=get_user_angles(user),
+        notify_digest_email=bool(user.notify_digest_email),
+        notify_followup_email=bool(user.notify_followup_email),
     )
 
 

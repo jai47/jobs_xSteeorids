@@ -21,7 +21,10 @@ from pipeline.stages.company_universe import update_company_universe
 from pipeline.stages.dedup import deduplicate
 from pipeline.stages.digest import generate_digest_for_user
 from pipeline.stages.fit_scorer import score_fit
+from pipeline.stages.fx_rates import refresh_fx_rates
+from pipeline.stages.job_enrichment import enrich_job_row
 from pipeline.stages.liveness import schedule_liveness_verification
+from pipeline.stages.legitimacy_rules import evaluate_legitimacy
 from pipeline.stages.overall_scorer import score_overall
 from pipeline.stages.overall_scorer import DIGEST_MIN_SCORE
 from pipeline.stages.skill_gap import maybe_generate_skill_gap_reports
@@ -187,6 +190,8 @@ class NightlyPipeline:
                     lambda: update_company_universe(universe_jobs, self.session),
                 )
 
+            self._run_stage("legitimacy", self._apply_legitimacy_flags)
+
             for user in self.users:
                 append_progress(
                     self.session,
@@ -269,6 +274,7 @@ class NightlyPipeline:
         return deduplicate(jobs).jobs
 
     def _store_jobs(self, jobs: list[JobDict]) -> None:
+        refresh_fx_rates(self.session)
         for job_dict in jobs:
             existing = (
                 self.session.query(Job)
@@ -287,27 +293,29 @@ class NightlyPipeline:
                 existing.description = job_dict.get("description")
                 existing.visa_keywords = job_dict.get("visa_keywords", [])
                 existing.visa_mentioned = bool(job_dict.get("visa_keywords"))
+                enrich_job_row(self.session, existing, job_dict)
                 continue
 
-            self.session.add(
-                Job(
-                    source=job_dict["source"],
-                    external_id=job_dict["external_id"],
-                    url=job_dict["url"],
-                    company=job_dict["company"],
-                    title=job_dict["title"],
-                    country=job_dict.get("country"),
-                    city=job_dict.get("city"),
-                    remote_type=job_dict.get("remote_type"),
-                    salary_display=job_dict.get("salary_display"),
-                    visa_keywords=job_dict.get("visa_keywords", []),
-                    visa_mentioned=bool(job_dict.get("visa_keywords")),
-                    skills_required=job_dict.get("skills_required", []),
-                    experience_min=job_dict.get("experience_min"),
-                    description=job_dict.get("description"),
-                    posted_at=job_dict.get("posted_at"),
-                )
+            row = Job(
+                source=job_dict["source"],
+                external_id=job_dict["external_id"],
+                url=job_dict["url"],
+                company=job_dict["company"],
+                title=job_dict["title"],
+                country=job_dict.get("country"),
+                city=job_dict.get("city"),
+                remote_type=job_dict.get("remote_type"),
+                salary_display=job_dict.get("salary_display"),
+                visa_keywords=job_dict.get("visa_keywords", []),
+                visa_mentioned=bool(job_dict.get("visa_keywords")),
+                skills_required=job_dict.get("skills_required", []),
+                experience_min=job_dict.get("experience_min"),
+                description=job_dict.get("description"),
+                posted_at=job_dict.get("posted_at"),
             )
+            self.session.add(row)
+            self.session.flush()
+            enrich_job_row(self.session, row, job_dict)
         self.session.flush()
 
     def _score_for_user(
@@ -405,6 +413,31 @@ class NightlyPipeline:
         opp.classification = scored.get("classification")
         opp.fit_reasoning = scored.get("fit_reasoning")
 
+    def _apply_legitimacy_flags(self) -> None:
+        from db.models import Company
+
+        company_names = {
+            name.lower()
+            for (name,) in self.session.query(Company.name).all()
+            if name
+        }
+        active_jobs = self.session.query(Job).filter(Job.is_active.is_(True)).all()
+        fingerprint_counts: dict[str, int] = {}
+        for job in active_jobs:
+            if job.dedup_fingerprint:
+                fingerprint_counts[job.dedup_fingerprint] = (
+                    fingerprint_counts.get(job.dedup_fingerprint, 0) + 1
+                )
+        for job in active_jobs:
+            in_universe = bool(job.company and job.company.lower() in company_names)
+            repost_count = fingerprint_counts.get(job.dedup_fingerprint or "", 0)
+            job.legitimacy_flags = evaluate_legitimacy(
+                job,
+                company_in_universe=in_universe,
+                repost_count=repost_count,
+            )
+        self.session.flush()
+
     def _generate_digest(self, user: User, jobs: list[JobDict]) -> None:
         digest_date = date.today()
         rows = (
@@ -422,7 +455,7 @@ class NightlyPipeline:
         opportunities = []
         for row in rows:
             job = jobs_by_id.get(row.job_id)
-            if job is None:
+            if job is None or job.repost_of_job_id is not None:
                 continue
             opportunities.append(
                 {
@@ -445,12 +478,24 @@ class NightlyPipeline:
             "after_dedup": self.run.jobs_after_dedup if self.run else 0,
             "scored": len(opportunities),
         }
-        generate_digest_for_user(
+        digest = generate_digest_for_user(
             self.session,
             user,
             digest_date=digest_date,
             metrics=metrics,
             opportunities=opportunities,
+        )
+        from services.notifications.producers import count_overdue_follow_ups, enqueue_digest_notifications
+
+        digest_eligible = len([o for o in opportunities if o.get("overall_score", 0) >= DIGEST_MIN_SCORE])
+        overdue = count_overdue_follow_ups(self.session, user)
+        enqueue_digest_notifications(
+            self.session,
+            user,
+            digest_date,
+            digest,
+            digest_eligible_count=digest_eligible,
+            overdue_follow_ups=overdue,
         )
 
 

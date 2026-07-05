@@ -1,15 +1,21 @@
-"""Skill gap report routes."""
+"""Skill gap and application analytics report routes."""
 
 from __future__ import annotations
 
-from typing import Annotated, Any
+from datetime import date
+from typing import Annotated, Any, Union
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from api.deps import get_current_user, get_db
+from api.schemas.analytics import (
+    ApplicationAnalyticsLocked,
+    ApplicationAnalyticsUnlocked,
+)
 from db.models import User
+from services.application_analytics import get_application_analytics_cached
 from services.skill_gap_reports import get_skill_gap_reports as fetch_skill_gap_reports
 
 router = APIRouter(prefix="/reports", tags=["reports"])
@@ -39,3 +45,22 @@ def get_skill_gap_reports(
         weekly=payload["weekly"],
         monthly=payload["monthly"],
     )
+
+
+@router.get(
+    "/application-analytics",
+    response_model=Union[ApplicationAnalyticsUnlocked, ApplicationAnalyticsLocked],
+)
+def get_application_analytics(
+    user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+    date_from: date | None = Query(default=None),
+    date_to: date | None = Query(default=None),
+) -> ApplicationAnalyticsUnlocked | ApplicationAnalyticsLocked:
+    """F05 — response-rate analytics (locked below 10 qualifying applications)."""
+    payload = get_application_analytics_cached(
+        db, user, date_from=date_from, date_to=date_to
+    )
+    if not payload.get("unlocked"):
+        return ApplicationAnalyticsLocked(**payload)
+    return ApplicationAnalyticsUnlocked(**payload)
