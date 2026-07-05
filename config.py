@@ -36,6 +36,11 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     pipeline_cron_hour: int = 2
     resume_storage_path: str = str(_REPO_ROOT / "resumes")
+    cors_origins: str = "http://localhost:3000,http://localhost:5173"
+
+    @property
+    def cors_origins_list(self) -> list[str]:
+        return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
 
     @property
     def database_url(self) -> str:

@@ -25,6 +25,11 @@ def _login_response(user: User) -> LoginResponse:
     )
 
 
+def _register_and_login(payload: SetupRequest, db: Session) -> LoginResponse:
+    user = create_user(db, name=payload.name, email=payload.email, password=payload.password)
+    return _login_response(user)
+
+
 @router.get("/status", response_model=AuthStatusResponse)
 def auth_status(db: Session = Depends(get_db)) -> AuthStatusResponse:
     """Report whether any dashboard users exist (public, no auth required)."""
@@ -33,17 +38,14 @@ def auth_status(db: Session = Depends(get_db)) -> AuthStatusResponse:
 
 @router.post("/setup", response_model=LoginResponse)
 def setup_first_user(payload: SetupRequest, db: Session = Depends(get_db)) -> LoginResponse:
-    """Create the first dashboard user when the database has none."""
-    if has_any_users(db):
-        raise APIError(
-            409,
-            "An account already exists. Use login instead.",
-            "SETUP_COMPLETE",
-        )
+    """Backward compatible route for creating a dashboard user."""
+    return _register_and_login(payload, db)
 
-    return _login_response(
-        create_user(db, name=payload.name, email=payload.email, password=payload.password)
-    )
+
+@router.post("/register", response_model=LoginResponse)
+def register(payload: SetupRequest, db: Session = Depends(get_db)) -> LoginResponse:
+    """Create a new dashboard user (public, no auth required)."""
+    return _register_and_login(payload, db)
 
 
 @router.post("/login", response_model=LoginResponse)
