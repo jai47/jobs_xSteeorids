@@ -23,6 +23,7 @@ class ApplicationResponse(BaseModel):
     notes: str | None = None
     updated_at: datetime | None = None
     opportunity_id: str | None = None
+    resume_version_id: str | None = None
     is_follow_up_overdue: bool = False
     is_second_follow_up_overdue: bool = False
     cover_letter_status: str | None = None

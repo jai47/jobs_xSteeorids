@@ -62,14 +62,38 @@ class UserProfileUpdate(BaseModel):
     notify_followup_email: bool | None = None
 
 
+class LLMProviderInfo(BaseModel):
+    id: str
+    label: str
+    configured: bool
+    model: str | None = None
+    env_keys: list[str] = Field(default_factory=list)
+
+
 class LLMStatusResponse(BaseModel):
+    selected_provider: str
+    providers: list[LLMProviderInfo]
     anthropic_configured: bool
     openai_configured: bool
     opencode_configured: bool
     opencode_model: str | None = None
     local_llm_configured: bool
     local_llm_model: str | None = None
+    deepseek_configured: bool = False
+    deepseek_model: str | None = None
+    google_configured: bool = False
+    google_model: str | None = None
+    kimi_configured: bool = False
+    kimi_model: str | None = None
+    azure_configured: bool = False
+    azure_deployment: str | None = None
+    aws_configured: bool = False
+    aws_model: str | None = None
     resume_parser_mode: str
+
+
+class LLMProviderUpdate(BaseModel):
+    provider: str = Field(min_length=1, max_length=32)
 
 
 class ResumeTextUpload(BaseModel):

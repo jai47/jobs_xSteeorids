@@ -14,6 +14,7 @@ weasyprint==61.2
 xhtml2pdf==0.2.16
 anthropic==0.28.0
 openai==1.30.0
+boto3>=1.34.131
 apscheduler==3.10.4
 bcrypt==4.1.3
 markdown==3.6

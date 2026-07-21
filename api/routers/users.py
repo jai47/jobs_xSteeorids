@@ -11,13 +11,15 @@ from api.deps import APIError, get_current_user, get_db
 from api.schemas.user import (
     BlacklistResponse,
     BlacklistUpdate,
+    LLMProviderUpdate,
     LLMStatusResponse,
     ResumeTextUpload,
     ResumeUploadResponse,
     UserProfileResponse,
     UserProfileUpdate,
 )
-from config import settings
+from llm.providers import build_status_payload
+from services.llm_runtime_config import VALID_PROVIDERS, set_selected_provider
 from db.models import User
 from services.cover_letters import get_user_angles
 from services.onboarding import save_master_resume_text, upload_master_resume, user_has_active_resume
@@ -125,16 +127,25 @@ def upload_resume_text(
 
 @router.get("/config/llm-status", response_model=LLMStatusResponse)
 def llm_status() -> LLMStatusResponse:
-    """Report whether LLM API keys are configured (values are never returned)."""
-    return LLMStatusResponse(
-        anthropic_configured=bool(settings.anthropic_api_key),
-        openai_configured=bool(settings.openai_api_key),
-        opencode_configured=bool(settings.opencode_api_key),
-        opencode_model=settings.opencode_model if settings.opencode_api_key else None,
-        local_llm_configured=bool(settings.local_llm_base_url),
-        local_llm_model=settings.local_llm_model if settings.local_llm_base_url else None,
-        resume_parser_mode=settings.resume_parser_mode,
-    )
+    """Report LLM provider configuration (key values are never returned)."""
+    return LLMStatusResponse(**build_status_payload())
+
+
+@router.patch("/config/llm-provider", response_model=LLMStatusResponse)
+def update_llm_provider(
+    payload: LLMProviderUpdate,
+    _user: Annotated[User, Depends(get_current_user)],
+) -> LLMStatusResponse:
+    """Set the preferred LLM provider for this deployment (keys remain in .env)."""
+    provider = payload.provider.strip().lower()
+    if provider not in VALID_PROVIDERS:
+        raise APIError(
+            400,
+            f"Unknown provider '{payload.provider}'. "
+            f"Choose one of: {', '.join(sorted(VALID_PROVIDERS))}.",
+        )
+    set_selected_provider(provider)
+    return LLMStatusResponse(**build_status_payload())
 
 
 @router.get("/users/me/blacklists", response_model=BlacklistResponse)

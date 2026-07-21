@@ -21,11 +21,31 @@ class Settings(BaseSettings):
     db_host: str = "db"
     db_port: int = 5432
 
+    # auto | anthropic | deepseek | google | kimi | azure | aws | opencode | local | openai
+    llm_provider: str = "auto"
+
     anthropic_api_key: str = ""
     openai_api_key: str = ""
+    deepseek_api_key: str = ""
+    deepseek_model: str = "deepseek-chat"
+    deepseek_base_url: str = "https://api.deepseek.com"
+    google_ai_api_key: str = ""
+    google_ai_model: str = "gemini-2.0-flash"
+    google_ai_base_url: str = "https://generativelanguage.googleapis.com/v1beta/openai"
+    azure_openai_api_key: str = ""
+    azure_openai_endpoint: str = ""
+    azure_openai_deployment: str = ""
+    azure_openai_api_version: str = "2024-02-15-preview"
+    aws_region: str = "us-east-1"
+    aws_bedrock_model_id: str = ""
     opencode_api_key: str = ""
     opencode_model: str = "mimo-v2.5-free"
     opencode_base_url: str = "https://opencode.ai/zen/v1"
+    # Moonshot AI Kimi — OpenAI-compatible endpoint. Confirm the exact model id
+    # for your account at platform.moonshot.ai; the default below is a guess.
+    kimi_api_key: str = ""
+    kimi_model: str = "kimi-k2-0905-preview"
+    kimi_base_url: str = "https://api.moonshot.ai/v1"
     local_llm_base_url: str = ""
     local_llm_model: str = "llama3.2"
     local_llm_api_key: str = "ollama"

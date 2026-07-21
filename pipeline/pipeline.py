@@ -10,9 +10,11 @@ import logging
 from datetime import date, datetime, timezone
 from typing import Any, Callable
 
+from sqlalchemy import tuple_
 from sqlalchemy.orm import Session
 
 from db.models import Job, PipelineRun, ScoredOpportunity, User
+from pipeline.cancel import PipelineCancelled, is_cancel_requested
 from pipeline.progress import append_progress, reset_progress
 from pipeline.sources.base import JobDict
 from pipeline.sources.registry import fetch_all_sources_sync
@@ -34,6 +36,7 @@ from services.onboarding import sync_user_skills_from_resume, user_has_active_re
 log = logging.getLogger(__name__)
 
 ScoredJobDict = dict[str, Any]
+_PROGRESS_EVERY_N_JOBS = 25
 
 
 class PipelineAlreadyRunningError(Exception):
@@ -114,7 +117,9 @@ class NightlyPipeline:
 
         jobs: list[JobDict] = []
         try:
-            jobs = self._run_stage("discover", self._discover)
+            self._abort_if_cancelled()
+            discovered = self._run_stage("discover", self._discover)
+            jobs = discovered if discovered is not None else []
             self.run.jobs_discovered = len(jobs)
             self.session.commit()
             append_progress(
@@ -125,6 +130,7 @@ class NightlyPipeline:
             )
 
             jobs = self._run_stage("deduplicate", lambda: self._deduplicate(jobs))
+            jobs = jobs if jobs is not None else []
             self.run.jobs_after_dedup = len(jobs)
             self.session.commit()
             append_progress(
@@ -147,6 +153,7 @@ class NightlyPipeline:
             universe_jobs: list[ScoredJobDict] = []
 
             for user in self.users:
+                self._abort_if_cancelled()
                 append_progress(
                     self.session,
                     self.run,
@@ -193,6 +200,7 @@ class NightlyPipeline:
             self._run_stage("legitimacy", self._apply_legitimacy_flags)
 
             for user in self.users:
+                self._abort_if_cancelled()
                 append_progress(
                     self.session,
                     self.run,
@@ -216,6 +224,15 @@ class NightlyPipeline:
                 stage="complete",
                 message=f"Pipeline finished with status: {self.run.status}",
             )
+        except PipelineCancelled:
+            log.info("Pipeline cancelled by user")
+            self.run.status = "cancelled"
+            append_progress(
+                self.session,
+                self.run,
+                stage="complete",
+                message="Pipeline cancelled by user",
+            )
         except Exception as exc:
             log.exception("Pipeline failed")
             self.run.status = "failed"
@@ -235,8 +252,13 @@ class NightlyPipeline:
 
         return self.run
 
+    def _abort_if_cancelled(self) -> None:
+        if is_cancel_requested():
+            raise PipelineCancelled()
+
     def _run_stage(self, stage: str, fn: Callable[[], Any]) -> Any:
         """Run a stage with fail-soft error handling."""
+        self._abort_if_cancelled()
         if self.run is not None:
             append_progress(
                 self.session,
@@ -246,6 +268,8 @@ class NightlyPipeline:
             )
         try:
             return fn()
+        except PipelineCancelled:
+            raise
         except Exception as exc:
             message = f"{stage}: {exc}"
             log.exception("Stage %s failed", stage)
@@ -263,6 +287,7 @@ class NightlyPipeline:
 
     def _discover(self) -> list[JobDict]:
         def on_progress(message: str) -> None:
+            self._abort_if_cancelled()
             if self.run is not None:
                 append_progress(self.session, self.run, stage="discover", message=message)
 
@@ -275,7 +300,9 @@ class NightlyPipeline:
 
     def _store_jobs(self, jobs: list[JobDict]) -> None:
         refresh_fx_rates(self.session)
-        for job_dict in jobs:
+        total = len(jobs)
+        for index, job_dict in enumerate(jobs, start=1):
+            self._abort_if_cancelled()
             existing = (
                 self.session.query(Job)
                 .filter_by(source=job_dict["source"], external_id=job_dict["external_id"])
@@ -294,28 +321,39 @@ class NightlyPipeline:
                 existing.visa_keywords = job_dict.get("visa_keywords", [])
                 existing.visa_mentioned = bool(job_dict.get("visa_keywords"))
                 enrich_job_row(self.session, existing, job_dict)
-                continue
+            else:
+                row = Job(
+                    source=job_dict["source"],
+                    external_id=job_dict["external_id"],
+                    url=job_dict["url"],
+                    company=job_dict["company"],
+                    title=job_dict["title"],
+                    country=job_dict.get("country"),
+                    city=job_dict.get("city"),
+                    remote_type=job_dict.get("remote_type"),
+                    salary_display=job_dict.get("salary_display"),
+                    visa_keywords=job_dict.get("visa_keywords", []),
+                    visa_mentioned=bool(job_dict.get("visa_keywords")),
+                    skills_required=job_dict.get("skills_required", []),
+                    experience_min=job_dict.get("experience_min"),
+                    description=job_dict.get("description"),
+                    posted_at=job_dict.get("posted_at"),
+                )
+                self.session.add(row)
+                self.session.flush()
+                enrich_job_row(self.session, row, job_dict)
 
-            row = Job(
-                source=job_dict["source"],
-                external_id=job_dict["external_id"],
-                url=job_dict["url"],
-                company=job_dict["company"],
-                title=job_dict["title"],
-                country=job_dict.get("country"),
-                city=job_dict.get("city"),
-                remote_type=job_dict.get("remote_type"),
-                salary_display=job_dict.get("salary_display"),
-                visa_keywords=job_dict.get("visa_keywords", []),
-                visa_mentioned=bool(job_dict.get("visa_keywords")),
-                skills_required=job_dict.get("skills_required", []),
-                experience_min=job_dict.get("experience_min"),
-                description=job_dict.get("description"),
-                posted_at=job_dict.get("posted_at"),
-            )
-            self.session.add(row)
-            self.session.flush()
-            enrich_job_row(self.session, row, job_dict)
+            if (
+                self.run is not None
+                and total > 0
+                and (index == total or index % _PROGRESS_EVERY_N_JOBS == 0)
+            ):
+                append_progress(
+                    self.session,
+                    self.run,
+                    stage="store_jobs",
+                    message=f"Stored {index}/{total} jobs...",
+                )
         self.session.flush()
 
     def _score_for_user(
@@ -339,8 +377,31 @@ class NightlyPipeline:
         scored_opportunities: list[ScoredJobDict] = []
         top_count = 0
         digest_date = date.today()
+        total = len(user_jobs)
 
-        for job_dict in user_jobs:
+        job_keys = [(job_dict["source"], job_dict["external_id"]) for job_dict in user_jobs]
+        jobs_by_key: dict[tuple[str, str], Job] = {}
+        if job_keys:
+            job_rows = (
+                self.session.query(Job)
+                .filter(tuple_(Job.source, Job.external_id).in_(job_keys))
+                .all()
+            )
+            jobs_by_key = {(row.source, row.external_id): row for row in job_rows}
+
+        job_ids = [row.id for row in jobs_by_key.values()]
+        opps_by_job_id: dict[object, ScoredOpportunity] = {}
+        if job_ids:
+            existing_opps = (
+                self.session.query(ScoredOpportunity)
+                .filter_by(user_id=user.id, digest_date=digest_date)
+                .filter(ScoredOpportunity.job_id.in_(job_ids))
+                .all()
+            )
+            opps_by_job_id = {opp.job_id: opp for opp in existing_opps}
+
+        for index, job_dict in enumerate(user_jobs, start=1):
+            self._abort_if_cancelled()
             scored = dict(job_dict)
             visa_result = score_visa(scored, user)
             scored.update(visa_result)
@@ -351,25 +412,34 @@ class NightlyPipeline:
             overall_result = score_overall(fit_result, visa_result)
             scored.update(overall_result)
 
-            job_row = (
-                self.session.query(Job)
-                .filter_by(source=job_dict["source"], external_id=job_dict["external_id"])
-                .one()
-            )
+            job_row = jobs_by_key.get((job_dict["source"], job_dict["external_id"]))
+            if job_row is None:
+                log.warning(
+                    "Skipping score for missing job %s/%s",
+                    job_dict["source"],
+                    job_dict["external_id"],
+                )
+                continue
 
-            existing_opp = (
-                self.session.query(ScoredOpportunity)
-                .filter_by(job_id=job_row.id, user_id=user.id, digest_date=digest_date)
-                .first()
-            )
+            existing_opp = opps_by_job_id.get(job_row.id)
             if existing_opp:
                 self._update_opportunity(existing_opp, scored)
             else:
-                self.session.add(self._new_opportunity(job_row.id, user.id, digest_date, scored))
+                opp = self._new_opportunity(job_row.id, user.id, digest_date, scored)
+                self.session.add(opp)
+                opps_by_job_id[job_row.id] = opp
 
             scored_opportunities.append(scored)
             if scored.get("overall_score", 0) >= DIGEST_MIN_SCORE:
                 top_count += 1
+
+            if self.run is not None and total > 0 and index % _PROGRESS_EVERY_N_JOBS == 0:
+                append_progress(
+                    self.session,
+                    self.run,
+                    stage="score",
+                    message=f"Scored {index}/{total} jobs for {user.email}...",
+                )
 
         self.session.flush()
         return scored_opportunities, len(scored_opportunities), top_count
@@ -428,7 +498,8 @@ class NightlyPipeline:
                 fingerprint_counts[job.dedup_fingerprint] = (
                     fingerprint_counts.get(job.dedup_fingerprint, 0) + 1
                 )
-        for job in active_jobs:
+        for index, job in enumerate(active_jobs, start=1):
+            self._abort_if_cancelled()
             in_universe = bool(job.company and job.company.lower() in company_names)
             repost_count = fingerprint_counts.get(job.dedup_fingerprint or "", 0)
             job.legitimacy_flags = evaluate_legitimacy(
@@ -436,6 +507,16 @@ class NightlyPipeline:
                 company_in_universe=in_universe,
                 repost_count=repost_count,
             )
+            if (
+                self.run is not None
+                and index % _PROGRESS_EVERY_N_JOBS == 0
+            ):
+                append_progress(
+                    self.session,
+                    self.run,
+                    stage="legitimacy",
+                    message=f"Evaluated legitimacy for {index}/{len(active_jobs)} jobs...",
+                )
         self.session.flush()
 
     def _generate_digest(self, user: User, jobs: list[JobDict]) -> None:

@@ -6,6 +6,7 @@ import uuid
 from typing import Annotated
 
 from fastapi import APIRouter, BackgroundTasks, Depends
+from fastapi.responses import Response
 from sqlalchemy.orm import Session
 
 from api.deps import APIError, get_current_user, get_db
@@ -13,12 +14,19 @@ from api.schemas.application import ApplicationListResponse, ApplicationResponse
 from api.schemas.notification import FollowUpDraftResponse
 from api.schemas.story import InterviewPrepResponse, StoryResponse, ThemesResponse, TimelineResponse, StageEventResponse
 from db.models import Application, CoverLetter, Job, ScoredOpportunity, User
-from services.application_tracker import _follow_up_flags, list_applications, update_application
+from services.application_tracker import (
+    _follow_up_flags,
+    delete_application,
+    list_applications,
+    update_application,
+)
 from services.approval_enrichment import run_theme_extraction
 from services.follow_up_draft import days_since_applied, personalise_follow_up_draft, render_follow_up_draft
 from services.interview_prep import interview_prep
+from services.resume_versions import regenerate_resume_for_application
 from services.stage_events import list_timeline_events, time_in_stage_days
 from services.theme_extraction import get_themes_for_application
+from api.routers.resumes import ResumeVersionItem
 
 router = APIRouter(prefix="/applications", tags=["applications"])
 
@@ -46,6 +54,7 @@ def _application_response(application, job, opportunity, db: Session) -> Applica
         notes=application.notes,
         updated_at=application.updated_at,
         opportunity_id=str(opportunity.id) if opportunity else None,
+        resume_version_id=str(application.resume_version_id) if application.resume_version_id else None,
         is_follow_up_overdue=first_overdue,
         is_second_follow_up_overdue=second_overdue,
         cover_letter_status=letter.status if letter else None,
@@ -96,6 +105,28 @@ def patch_application(
         .first()
     )
     return _application_response(application, job, opp, db)
+
+
+@router.delete("/{application_id}", status_code=204, response_class=Response)
+def remove_application(
+    application_id: uuid.UUID,
+    user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> Response:
+    """Remove an application from the tracker."""
+    delete_application(db, user, application_id)
+    return Response(status_code=204)
+
+
+@router.post("/{application_id}/resume/regenerate", response_model=ResumeVersionItem)
+def regenerate_application_resume(
+    application_id: uuid.UUID,
+    user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> ResumeVersionItem:
+    """Regenerate the tailored resume for an approved application."""
+    item = regenerate_resume_for_application(db, user, application_id)
+    return ResumeVersionItem(**item)
 
 
 @router.get("/{application_id}/timeline", response_model=TimelineResponse)

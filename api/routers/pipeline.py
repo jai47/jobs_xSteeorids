@@ -12,7 +12,8 @@ from api.schemas.pipeline import LLMUsageResponse, PipelineRunListResponse, Pipe
 from db.models import LLMUsage, PipelineRun, User
 from pipeline.pipeline import PipelineAlreadyRunningError, start_pipeline_run
 from pipeline.progress import STAGE_LABELS
-from pipeline.runner import schedule_pipeline_run
+from pipeline.cancel import request_pipeline_cancel
+from pipeline.runner import is_background_pipeline_running, schedule_pipeline_run
 
 router = APIRouter(prefix="/pipeline", tags=["pipeline"])
 
@@ -57,6 +58,30 @@ def trigger_pipeline_run(
         schedule_pipeline_run()
     except PipelineAlreadyRunningError:
         raise APIError(409, "Pipeline is already running", "PIPELINE_RUNNING") from None
+    return _run_response(run)
+
+
+@router.post("/cancel", response_model=PipelineRunResponse)
+def cancel_pipeline_run(
+    _user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> PipelineRunResponse:
+    """Request cooperative cancellation of today's running pipeline."""
+    from datetime import date, datetime, timezone
+
+    run = db.query(PipelineRun).filter_by(run_date=date.today()).first()
+    if run is None or run.status != "running":
+        raise APIError(409, "No pipeline is currently running", "PIPELINE_NOT_RUNNING")
+    if not is_background_pipeline_running():
+        run.status = "failed"
+        run.completed_at = datetime.now(timezone.utc)
+        if not run.error_message:
+            run.error_message = "Run interrupted before completion"
+        db.commit()
+        db.refresh(run)
+        return _run_response(run)
+    request_pipeline_cancel()
+    db.refresh(run)
     return _run_response(run)
 
 

@@ -17,6 +17,7 @@ GENERATION_PURPOSES = frozenset(
         "cover_letter",
         "star_themes",
         "follow_up_personalise",
+        "resume_tailoring",
     }
 )
 

@@ -148,3 +148,21 @@ def update_application(
         invalidate_user_analytics_cache(user.id)
 
     return application, job
+
+
+def delete_application(
+    session: Session,
+    user: User,
+    application_id: uuid.UUID,
+) -> None:
+    """Remove an application from the tracker (related cover letter/themes cascade)."""
+    application = session.get(Application, application_id)
+    if application is None or application.user_id != user.id:
+        raise APIError(404, "Application not found", "NOT_FOUND")
+
+    from services.notifications.producers import cancel_follow_up_for_application
+
+    cancel_follow_up_for_application(session, application.id)
+    session.delete(application)
+    session.flush()
+    invalidate_user_analytics_cache(user.id)

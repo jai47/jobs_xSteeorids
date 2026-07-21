@@ -6,6 +6,7 @@ import logging
 import shutil
 import subprocess
 import tempfile
+from io import BytesIO
 from pathlib import Path
 
 log = logging.getLogger(__name__)
@@ -13,6 +14,13 @@ log = logging.getLogger(__name__)
 
 def tectonic_available() -> bool:
     return shutil.which("tectonic") is not None
+
+
+def count_pdf_pages(pdf_bytes: bytes) -> int:
+    """Return the page count of a rendered PDF, used to enforce one-page resumes."""
+    from pdfminer.pdfpage import PDFPage
+
+    return len(list(PDFPage.get_pages(BytesIO(pdf_bytes))))
 
 
 def compile_latex_to_pdf(latex_source: str) -> bytes:

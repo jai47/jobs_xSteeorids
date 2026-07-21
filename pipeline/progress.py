@@ -19,6 +19,7 @@ STAGE_LABELS = {
     "score": "Scoring",
     "liveness": "Liveness checks",
     "company_universe": "Company universe",
+    "legitimacy": "Legitimacy checks",
     "digest": "Daily digest",
     "skill_gap": "Skill gap report",
     "complete": "Complete",

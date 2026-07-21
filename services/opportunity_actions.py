@@ -15,6 +15,29 @@ from services.resume_tailoring import create_tailored_resume_version, get_active
 VALID_REJECT_REASONS = {"company", "role", "location", "other"}
 
 
+def _parse_csv_values(raw: str | None) -> list[str]:
+    """Split comma-separated filter values, ignoring blanks."""
+    if not raw:
+        return []
+    return [part.strip() for part in raw.split(",") if part.strip()]
+
+
+def _merge_filter_values(single: str | None, multi: str | None) -> list[str]:
+    """Union single legacy param with comma-separated multi param."""
+    values: list[str] = []
+    if single:
+        values.append(single.strip())
+    values.extend(_parse_csv_values(multi))
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for value in values:
+        key = value.upper() if len(value) == 2 else value
+        if key not in seen:
+            seen.add(key)
+            ordered.append(value)
+    return ordered
+
+
 def _get_opportunity_for_user(
     session: Session,
     user: User,
@@ -42,10 +65,14 @@ def list_opportunities(
     page: int = 1,
     page_size: int = 25,
     country: str | None = None,
+    countries: str | None = None,
     visa_status: str | None = None,
+    visa_statuses: str | None = None,
     classification: str | None = None,
+    classifications: str | None = None,
     min_score: float | None = None,
     archetype: str | None = None,
+    archetypes: str | None = None,
     min_salary_usd: int | None = None,
     exclude_suspicious: bool = False,
     date_from: date | None = None,
@@ -59,16 +86,20 @@ def list_opportunities(
         .order_by(ScoredOpportunity.overall_score.desc(), ScoredOpportunity.created_at.desc())
     )
 
-    if country:
-        query = query.filter(Job.country == country.upper())
-    if visa_status:
-        query = query.filter(ScoredOpportunity.visa_status == visa_status)
-    if classification:
-        query = query.filter(ScoredOpportunity.classification == classification)
+    country_values = [c.upper() for c in _merge_filter_values(country, countries)]
+    if country_values:
+        query = query.filter(Job.country.in_(country_values))
+    visa_values = _merge_filter_values(visa_status, visa_statuses)
+    if visa_values:
+        query = query.filter(ScoredOpportunity.visa_status.in_(visa_values))
+    classification_values = _merge_filter_values(classification, classifications)
+    if classification_values:
+        query = query.filter(ScoredOpportunity.classification.in_(classification_values))
     if min_score is not None:
         query = query.filter(ScoredOpportunity.overall_score >= min_score)
-    if archetype:
-        query = query.filter(Job.archetype == archetype)
+    archetype_values = _merge_filter_values(archetype, archetypes)
+    if archetype_values:
+        query = query.filter(Job.archetype.in_(archetype_values))
     if min_salary_usd is not None:
         query = query.filter(Job.salary_usd_max >= min_salary_usd)
     if exclude_suspicious:
