@@ -94,6 +94,7 @@ def list_pipeline_stages() -> dict[str, str]:
 def _estimate_cost_usd(provider: str, prompt_tokens: int, completion_tokens: int) -> float:
     """Rough per-call cost estimate for dashboard display."""
     rates = {
+        "groq": (0.59 / 1_000_000, 0.79 / 1_000_000),
         "anthropic": (3.0 / 1_000_000, 15.0 / 1_000_000),
         "openai": (2.5 / 1_000_000, 10.0 / 1_000_000),
         "opencode": (2.5 / 1_000_000, 10.0 / 1_000_000),

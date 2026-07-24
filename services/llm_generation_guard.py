@@ -18,6 +18,23 @@ GENERATION_PURPOSES = frozenset(
         "star_themes",
         "follow_up_personalise",
         "resume_tailoring",
+        "linkedin_outreach",
+        "linkedin_profile",
+        "linkedin_find_network",
+        "message_pack",
+        "interview_mock",
+        "reply_coach",
+        "autopilot_chat",
+        "resume_score",
+        "weekly_skill_plan",
+        "offer_compare",
+        "conversation_assistant",
+        "networking_agent",
+        "company_research",
+        "form_answers",
+        "patterns_summary",
+        "training_score",
+        "project_score",
     }
 )
 

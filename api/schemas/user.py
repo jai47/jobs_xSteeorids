@@ -79,6 +79,8 @@ class LLMStatusResponse(BaseModel):
     opencode_model: str | None = None
     local_llm_configured: bool
     local_llm_model: str | None = None
+    groq_configured: bool = False
+    groq_model: str | None = None
     deepseek_configured: bool = False
     deepseek_model: str | None = None
     google_configured: bool = False

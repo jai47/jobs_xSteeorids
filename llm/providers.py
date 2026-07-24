@@ -21,6 +21,7 @@ ANTHROPIC_MODEL = "claude-sonnet-4-20250514"
 OPENAI_MODEL = "gpt-4o"
 
 DEFAULT_CHAIN = (
+    "groq",
     "anthropic",
     "deepseek",
     "google",
@@ -42,6 +43,7 @@ class ProviderMeta:
 
 PROVIDER_META: dict[str, ProviderMeta] = {
     "auto": ProviderMeta("auto", "Auto (fallback chain)", ()),
+    "groq": ProviderMeta("groq", "Groq", ("GROQ_API_KEY", "GROQ_MODEL")),
     "anthropic": ProviderMeta("anthropic", "Anthropic Claude", ("ANTHROPIC_API_KEY",)),
     "deepseek": ProviderMeta(
         "deepseek",
@@ -229,6 +231,8 @@ def _call_bedrock(
 def is_provider_configured(provider_id: str) -> bool:
     if provider_id == "auto":
         return any(is_provider_configured(pid) for pid in DEFAULT_CHAIN)
+    if provider_id == "groq":
+        return bool(settings.groq_api_key)
     if provider_id == "anthropic":
         return bool(settings.anthropic_api_key)
     if provider_id == "deepseek":
@@ -258,6 +262,7 @@ def provider_model_name(provider_id: str) -> str | None:
     if not is_provider_configured(provider_id):
         return None
     models = {
+        "groq": settings.groq_model,
         "anthropic": ANTHROPIC_MODEL,
         "deepseek": settings.deepseek_model,
         "google": settings.google_ai_model,
@@ -279,6 +284,18 @@ def call_provider(
     session: Session,
     max_tokens: int,
 ) -> str:
+    if provider_id == "groq":
+        return _call_openai_compatible(
+            api_key=settings.groq_api_key,
+            base_url=settings.groq_base_url,
+            model=settings.groq_model,
+            provider="groq",
+            prompt=prompt,
+            purpose=purpose,
+            user_id=user_id,
+            session=session,
+            max_tokens=max_tokens,
+        )
     if provider_id == "anthropic":
         return _call_anthropic(prompt, purpose, user_id, session, max_tokens)
     if provider_id == "deepseek":
@@ -400,6 +417,8 @@ def build_status_payload() -> dict[str, Any]:
         "opencode_model": provider_model_name("opencode"),
         "local_llm_configured": is_provider_configured("local"),
         "local_llm_model": provider_model_name("local"),
+        "groq_configured": is_provider_configured("groq"),
+        "groq_model": provider_model_name("groq"),
         "deepseek_configured": is_provider_configured("deepseek"),
         "deepseek_model": provider_model_name("deepseek"),
         "google_configured": is_provider_configured("google"),

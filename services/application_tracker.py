@@ -147,6 +147,15 @@ def update_application(
     if status_changed or applied_at is not None:
         invalidate_user_analytics_cache(user.id)
 
+    # Lazy-prep interview pack when moving into interviewing (fail-soft, sync light).
+    if status_changed and application.status == "interviewing":
+        try:
+            from services.autopilot.interview_pack import generate_and_store_interview_pack
+
+            generate_and_store_interview_pack(session, user, application.id, check_limits=False)
+        except Exception:
+            pass
+
     return application, job
 
 

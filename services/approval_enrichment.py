@@ -32,6 +32,14 @@ def run_cover_letter_enrichment(application_id: uuid.UUID, user_id: uuid.UUID) -
     finally:
         session.close()
 
+    # After cover letter, seed Apply Packet bits (message pack + network suggestions).
+    try:
+        from services.autopilot.apply_packet import ensure_apply_packet_bits
+
+        ensure_apply_packet_bits(application_id, user_id)
+    except Exception:
+        log.exception("Apply packet enrichment failed for application %s", application_id)
+
 
 def run_theme_extraction(application_id: uuid.UUID, user_id: uuid.UUID) -> None:
     """Background task: extract interview themes after approve (fail-soft)."""

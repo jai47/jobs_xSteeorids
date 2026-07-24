@@ -21,11 +21,14 @@ class Settings(BaseSettings):
     db_host: str = "db"
     db_port: int = 5432
 
-    # auto | anthropic | deepseek | google | kimi | azure | aws | opencode | local | openai
+    # auto | groq | anthropic | deepseek | google | kimi | azure | aws | opencode | local | openai
     llm_provider: str = "auto"
 
     anthropic_api_key: str = ""
     openai_api_key: str = ""
+    groq_api_key: str = ""
+    groq_model: str = "llama-3.3-70b-versatile"
+    groq_base_url: str = "https://api.groq.com/openai/v1"
     deepseek_api_key: str = ""
     deepseek_model: str = "deepseek-chat"
     deepseek_base_url: str = "https://api.deepseek.com"

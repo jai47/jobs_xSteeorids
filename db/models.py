@@ -47,6 +47,10 @@ class User(Base):
     cover_letter_angles = Column(JSONB, default=lambda: dict())
     notify_digest_email = Column(Boolean, default=True, nullable=False)
     notify_followup_email = Column(Boolean, default=True, nullable=False)
+    # Last LinkedIn profile coach analysis (NxtJob-style suggestions; user-pasted profile text).
+    linkedin_profile_analysis = Column(JSONB, nullable=True)
+    # Autopilot cache: resume_score, weekly_skill_plan, chat_memory.
+    autopilot = Column(JSONB, nullable=True)
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
 
 
@@ -145,6 +149,8 @@ class MasterResume(Base):
     raw_text = Column(Text)
     parsed_json = Column(JSON)
     is_active = Column(Boolean, default=True)
+    # Persona label for multi-resume (e.g. "ML Engineer"); active master used for tailoring.
+    label = Column(String, nullable=True)
     uploaded_at = Column(DateTime(timezone=True), default=datetime.utcnow)
 
 
@@ -180,6 +186,8 @@ class Application(Base):
     second_follow_up_due = Column(Date)
     notes = Column(Text)
     sub_status = Column(String, nullable=True)
+    # Autopilot cache: message_pack, interview_pack, network_suggestions, packet flags.
+    autopilot = Column(JSONB, nullable=True)
     updated_at = Column(DateTime(timezone=True), default=datetime.utcnow)
 
 
@@ -334,3 +342,36 @@ class ApplicationStageEvent(Base):
     from_sub = Column(String, nullable=True)
     to_sub = Column(String, nullable=True)
     occurred_at = Column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
+
+
+class NetworkContact(Base):
+    """LinkedIn outreach contact tracked per user (copy-paste send; no LinkedIn session)."""
+
+    __tablename__ = "network_contacts"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    application_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("applications.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    job_id = Column(UUID(as_uuid=True), ForeignKey("jobs.id", ondelete="SET NULL"), nullable=True)
+    company = Column(String, nullable=False, default="")
+    person_name = Column(String, nullable=False)
+    linkedin_url = Column(String, nullable=False)
+    role_tag = Column(String, nullable=False, default="recruiter")
+    status = Column(String, nullable=False, default="drafted")
+    message_draft = Column(Text)
+    message_template = Column(String, nullable=False, default="referral")
+    sent_at = Column(DateTime(timezone=True))
+    follow_up_due = Column(Date)
+    notes = Column(Text)
+    # Networking Agent: sequenced connect → follow-up → nudge (drafts; user/extension sends).
+    agent_enabled = Column(Boolean, default=False, nullable=False)
+    agent_step = Column(String, nullable=True)  # connect|awaiting_accept|follow_up|nudge|replied|paused
+    next_action_at = Column(DateTime(timezone=True), nullable=True)
+    nudge_count = Column(Integer, default=0, nullable=False)
+    agent_meta = Column(JSONB, nullable=True)
+    created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
+    updated_at = Column(DateTime(timezone=True), default=datetime.utcnow)
