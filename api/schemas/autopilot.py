@@ -189,11 +189,74 @@ class SuggestedAction(BaseModel):
     action: str
     label: str
     application_id: str | None = None
+    path: str | None = None
+
+
+class ChatVisualStat(BaseModel):
+    label: str
+    value: str
+    tone: Literal["neutral", "accent", "warn", "ok"] = "neutral"
+
+
+class ChatVisualJob(BaseModel):
+    title: str
+    company: str
+    score: float | None = None
+    opportunity_id: str | None = None
+    url: str | None = None
+
+
+class ChatVisualProgress(BaseModel):
+    label: str
+    value: int
+    max: int = 100
+
+
+class ChatVisualChecklistItem(BaseModel):
+    label: str
+    done: bool = False
+    path: str | None = None
+
+
+class ChatVisual(BaseModel):
+    """Rich visual card embedded in a chat reply."""
+
+    type: Literal[
+        "stat_row",
+        "job_list",
+        "progress",
+        "checklist",
+        "quick_replies",
+        "route_cta",
+        "tip",
+    ]
+    title: str | None = None
+    stats: list[ChatVisualStat] = Field(default_factory=list)
+    jobs: list[ChatVisualJob] = Field(default_factory=list)
+    progress: ChatVisualProgress | None = None
+    checklist: list[ChatVisualChecklistItem] = Field(default_factory=list)
+    quick_replies: list[str] = Field(default_factory=list)
+    path: str | None = None
+    label: str | None = None
+    body: str | None = None
 
 
 class ChatResponse(BaseModel):
     reply: str
     suggested_actions: list[SuggestedAction] = Field(default_factory=list)
+    visuals: list[ChatVisual] = Field(default_factory=list)
+    mood: Literal["neutral", "encouraging", "urgent", "celebratory"] = "neutral"
+
+
+class ChatHistoryMessage(BaseModel):
+    role: Literal["user", "assistant"]
+    content: str
+    visuals: list[ChatVisual] = Field(default_factory=list)
+    suggested_actions: list[SuggestedAction] = Field(default_factory=list)
+
+
+class ChatHistoryResponse(BaseModel):
+    messages: list[ChatHistoryMessage]
 
 
 class MasterResumeItem(BaseModel):

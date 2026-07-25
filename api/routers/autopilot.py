@@ -14,6 +14,7 @@ from api.schemas.autopilot import (
     ApplyPacketResponse,
     AutoPipelineRequest,
     AutoPipelineResponse,
+    ChatHistoryResponse,
     ChatRequest,
     ChatResponse,
     CompanyResearchRequest,
@@ -42,7 +43,7 @@ from db.models import User
 from services.autopilot.apply_packet import build_apply_packet, ensure_apply_packet
 from services.autopilot.auto_pipeline import run_auto_pipeline
 from services.autopilot.calendar_ics import build_calendar_ics
-from services.autopilot.chat import run_chat
+from services.autopilot.chat import clear_chat_history, get_chat_history, run_chat
 from services.autopilot.company_research import research_company
 from services.autopilot.form_answers import generate_and_store_form_answers, get_form_answers
 from services.autopilot.interview_pack import (
@@ -293,6 +294,23 @@ def post_chat(
     db: Annotated[Session, Depends(get_db)],
 ) -> ChatResponse:
     return run_chat(db, user, payload)
+
+
+@router.get("/chat/history", response_model=ChatHistoryResponse)
+def get_chat_history_route(
+    user: Annotated[User, Depends(get_current_user)],
+) -> ChatHistoryResponse:
+    return get_chat_history(user)
+
+
+@router.delete("/chat/history", response_model=ChatHistoryResponse)
+def delete_chat_history_route(
+    user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> ChatHistoryResponse:
+    result = clear_chat_history(user)
+    db.flush()
+    return result
 
 
 @router.get("/master-resumes", response_model=MasterResumeListResponse)
