@@ -38,15 +38,18 @@ Return ONLY JSON:
 {{
   "reply": "...",
   "mood": "neutral|encouraging|urgent|celebratory",
+  "tour_id": "site_tour|apply_flow|follow_ups|jobs_browse|upload_resume|network_outreach|today_focus|analytics|null",
   "suggested_actions": [
     {{
-      "action": "ensure_packet|message_pack|interview_pack|follow_up|open_today|open_tracker|open_opportunities|open_networks|open_analytics",
+      "action": "ensure_packet|message_pack|interview_pack|follow_up|open_today|open_tracker|open_opportunities|open_networks|open_analytics|start_tour:site_tour",
       "label": "...",
       "application_id": "uuid-or-null",
       "path": "/today|/tracker|/opportunities|/networks|/analytics|null"
     }}
   ]
 }}
+
+When the user asks how to use the app, for a walkthrough, or how to apply/follow up/upload resume, set tour_id accordingly.
 """
     raw = call_llm(prompt, "autopilot_chat", user_id, session, max_tokens=1000)
     data = parse_llm_json(raw)

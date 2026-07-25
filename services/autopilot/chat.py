@@ -19,6 +19,7 @@ from api.schemas.autopilot import (
 )
 from db.models import User
 from llm.autopilot_chat import generate_chat_reply
+from services.autopilot.coach_tours import match_tour, tour_action_label
 from services.autopilot.state import get_user_autopilot, patch_user_autopilot
 from services.autopilot.today import build_today_queue
 from services.llm_generation_guard import enforce_daily_generation_guard
@@ -258,6 +259,7 @@ def run_chat(session: Session, user: User, payload: ChatRequest) -> ChatResponse
     ]
 
     mood: str = "neutral"
+    raw: dict = {}
     try:
         raw = generate_chat_reply(
             message=payload.message,
@@ -315,10 +317,52 @@ def run_chat(session: Session, user: User, payload: ChatRequest) -> ChatResponse
             )
 
     actions = _enrich_actions(actions)
-    if not actions:
+
+    llm_tid = str(raw.get("tour_id") or "").strip() or None
+    tour_id, tour_steps = match_tour(payload.message, tour_id=llm_tid)
+
+    if tour_steps:
+        actions.insert(
+            0,
+            SuggestedAction(
+                action=f"start_tour:{tour_id}",
+                label=tour_action_label(tour_id or "site_tour"),
+                application_id=None,
+                path=tour_steps[0].path,
+            ),
+        )
+        if "tour" not in reply.lower() and "guide" not in reply.lower() and "walk" not in reply.lower():
+            reply = (
+                f"{reply.rstrip()} I’ll walk you through it on the page — tap "
+                f"“{tour_action_label(tour_id or 'site_tour')}”."
+            )
+    else:
+        # Offer optional full tour (steps fetched via GET /coach-tours/site_tour)
+        tour_id, tour_steps = None, []
+        actions.append(
+            SuggestedAction(
+                action="start_tour:site_tour",
+                label="Start site tour",
+                application_id=None,
+                path="/today",
+            )
+        )
+
+    if not any(a.action.startswith("open_") or a.path for a in actions):
         actions.append(
             SuggestedAction(action="open_today", label="Open Today", path="/today")
         )
+
+    # Dedupe actions by label
+    seen: set[str] = set()
+    deduped: list[SuggestedAction] = []
+    for a in actions:
+        key = a.label.strip().lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(a)
+    actions = deduped
 
     memory.append({"role": "user", "content": payload.message[:500]})
     memory.append(
@@ -326,14 +370,18 @@ def run_chat(session: Session, user: User, payload: ChatRequest) -> ChatResponse
             "role": "assistant",
             "content": reply[:800],
             "visuals": [v.model_dump() for v in visuals[:4]],
-            "suggested_actions": [a.model_dump() for a in actions[:5]],
+            "suggested_actions": [a.model_dump() for a in actions[:6]],
+            "tour_id": tour_id if tour_steps else None,
+            "tour": [s.model_dump() for s in tour_steps[:12]],
         }
     )
     patch_user_autopilot(user, chat_memory=memory[-16:])
     session.flush()
     return ChatResponse(
         reply=reply,
-        suggested_actions=actions[:5],
+        suggested_actions=actions[:6],
         visuals=visuals,
         mood=mood,  # type: ignore[arg-type]
+        tour_id=tour_id if tour_steps else None,
+        tour=tour_steps,
     )

@@ -303,6 +303,20 @@ def get_chat_history_route(
     return get_chat_history(user)
 
 
+@router.get("/coach-tours/{tour_id}")
+def get_coach_tour(
+    tour_id: str,
+    user: Annotated[User, Depends(get_current_user)],
+) -> dict:
+    from services.autopilot.coach_tours import TOURS, match_tour
+
+    _ = user
+    tid, steps = match_tour("", tour_id=tour_id)
+    if not steps:
+        raise APIError(404, f"Unknown tour: {tour_id}", "NOT_FOUND")
+    return {"tour_id": tid, "steps": [s.model_dump() for s in steps], "available": list(TOURS.keys())}
+
+
 @router.delete("/chat/history", response_model=ChatHistoryResponse)
 def delete_chat_history_route(
     user: Annotated[User, Depends(get_current_user)],

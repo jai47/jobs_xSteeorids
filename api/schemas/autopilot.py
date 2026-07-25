@@ -241,11 +241,23 @@ class ChatVisual(BaseModel):
     body: str | None = None
 
 
+class CoachTourStep(BaseModel):
+    """One spotlight step in an interactive website tour."""
+
+    path: str
+    target: str
+    title: str
+    body: str
+    placement: Literal["top", "bottom", "left", "right", "auto"] = "auto"
+
+
 class ChatResponse(BaseModel):
     reply: str
     suggested_actions: list[SuggestedAction] = Field(default_factory=list)
     visuals: list[ChatVisual] = Field(default_factory=list)
     mood: Literal["neutral", "encouraging", "urgent", "celebratory"] = "neutral"
+    tour_id: str | None = None
+    tour: list[CoachTourStep] = Field(default_factory=list)
 
 
 class ChatHistoryMessage(BaseModel):
@@ -253,6 +265,8 @@ class ChatHistoryMessage(BaseModel):
     content: str
     visuals: list[ChatVisual] = Field(default_factory=list)
     suggested_actions: list[SuggestedAction] = Field(default_factory=list)
+    tour_id: str | None = None
+    tour: list[CoachTourStep] = Field(default_factory=list)
 
 
 class ChatHistoryResponse(BaseModel):
