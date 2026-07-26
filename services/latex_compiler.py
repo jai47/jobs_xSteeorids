@@ -54,13 +54,19 @@ def _build_command(engine: str, tex_path: Path) -> list[str]:
 
 
 def _normalize_legacy_template_source(source: str) -> str:
-    """Repair a legacy template ambiguity.
+    """Repair legacy / unwanted patterns before compile.
 
-    A line beginning with ``[...`` immediately after ``\\`` is parsed by TeX
-    as the optional vertical-space argument to the line break. Older cached
-    resume sources can still contain this placeholder pattern.
+    - A line beginning with ``[...`` immediately after ``\\`` is parsed by TeX
+      as the optional vertical-space argument to the line break.
+    - Older generators injected a ``Target: role @ company`` italic line under
+      the name; the template's only subheading is the contact/communication row.
     """
-    return re.sub(r"(\\\\)\s*\n(\s*)(?=\[)", r"\1{}\n\2", source)
+    fixed = re.sub(r"(\\\\)\s*\n(\s*)(?=\[)", r"\1{}\n\2", source)
+    return re.sub(
+        r"\{\\centering(?:\\small)?\\textit\{(?:Target|Applying)[^}]*\}\\par\}\s*",
+        "",
+        fixed,
+    )
 
 
 def compile_latex_to_pdf(latex_source: str) -> bytes:

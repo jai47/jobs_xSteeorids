@@ -14,7 +14,8 @@ from db.models import Application, Job, MasterResume, ResumeVersion, User
 from llm.client import LLMError
 from llm.resume_latex import generate_latex_resume
 from services.latex_compiler import compile_latex_to_pdf, count_pdf_pages, tectonic_available
-from services.resume_formatter import build_structured_latex
+from services.resume_formatter import build_structured_latex, merge_contact_overrides
+from llm.providers import is_provider_configured
 
 log = logging.getLogger(__name__)
 
@@ -57,6 +58,68 @@ def _ai_tailored(version: ResumeVersion) -> bool:
     )
 
 
+def _llm_available() -> bool:
+    return is_provider_configured("auto")
+
+
+def _master_text_for_user(session: Session, user_id) -> str:
+    master = (
+        session.query(MasterResume)
+        .filter_by(user_id=user_id, is_active=True)
+        .order_by(MasterResume.uploaded_at.desc())
+        .first()
+    )
+    return (master.raw_text if master else "") or ""
+
+
+def _resolve_contact_fields(
+    session: Session,
+    version: ResumeVersion,
+    user: User | None = None,
+) -> dict[str, str]:
+    """Prefer contact from tailored markdown, then master resume, then account email."""
+    if user is None:
+        user = session.get(User, version.user_id)
+    master_text = _master_text_for_user(session, version.user_id)
+    fields = merge_contact_overrides(version.tailored_markdown or "", master_text)
+    if user and user.email and not fields.get("email"):
+        fields["email"] = user.email
+    return fields
+
+
+def _ensure_contact_in_latex(latex: str, contact_fields: dict[str, str]) -> str:
+    """If the model dropped the contact row, inject it under the Huge name."""
+    if not contact_fields:
+        return latex
+    if "\\faEnvelope" in latex or "\\faMobile" in latex:
+        return latex
+
+    from services.resume_formatter import _as_url, _escape_latex
+
+    segments: list[str] = []
+    if contact_fields.get("email"):
+        segments.append(rf"\faEnvelope\ {_escape_latex(contact_fields['email'])}")
+    if contact_fields.get("phone"):
+        segments.append(rf"\faMobile\ {_escape_latex(contact_fields['phone'])}")
+    if contact_fields.get("github"):
+        segments.append(
+            rf"\href{{{_as_url(contact_fields['github'])}}}{{\faGithub\ GitHub}}"
+        )
+    if contact_fields.get("linkedin"):
+        segments.append(
+            rf"\href{{{_as_url(contact_fields['linkedin'])}}}{{\faLinkedin\ LinkedIn}}"
+        )
+    if not segments:
+        return latex
+
+    contact_row = " $|$\n".join(segments)
+    marker = r"\end{tabularx}"
+    idx = latex.find(marker)
+    if idx == -1:
+        return latex
+    return latex[:idx] + contact_row + "\n" + latex[idx:]
+
+
 def _version_dict(
     session: Session,
     version: ResumeVersion,
@@ -79,7 +142,9 @@ def _version_dict(
         "keywords_added": list(version.keywords_added or []),
         "skill_gaps": list(version.skill_gaps or []),
         "ai_tailored": _ai_tailored(version),
-        "ai_latex": _ai_tailored(version) and bool(version.latex_source),
+        "ai_latex": bool(version.latex_source) and (
+            _ai_tailored(version) or (_llm_available() and "\\faEnvelope" in (version.latex_source or ""))
+        ),
         "pdf_engine": "latex" if tectonic_available() else "html",
         "master_text": master_text,
         "tailored_markdown": version.tailored_markdown or "",
@@ -199,12 +264,24 @@ def _generate_one_page_latex(
     company: str,
     user_id,
     session: Session,
+    *,
+    job_description: str = "",
+    contact_fields: dict[str, str] | None = None,
 ) -> tuple[str, bool | None]:
     """Generate template-based LaTeX via the LLM, verifying it compiles and fits
     one page. Returns the LaTeX and whether it was verified to fit one page
     (None if unverifiable — no LaTeX engine). Raises LLMError if the LLM path
     is unavailable entirely."""
-    latex = generate_latex_resume(tailored, job_title, company, user_id, session)
+    latex = generate_latex_resume(
+        tailored,
+        job_title,
+        company,
+        user_id,
+        session,
+        job_description=job_description,
+        contact_fields=contact_fields,
+    )
+    latex = _ensure_contact_in_latex(latex, contact_fields or {})
     compiles = _latex_compiles(latex)
     if compiles is False:
         log.warning("AI LaTeX failed to compile; regenerating with compile-fix hint")
@@ -216,8 +293,10 @@ def _generate_one_page_latex(
                 user_id,
                 session,
                 overflow_hint=True,
+                job_description=job_description,
+                contact_fields=contact_fields,
             )
-            # Append a stronger compile-oriented retry if still broken.
+            latex = _ensure_contact_in_latex(latex, contact_fields or {})
             compiles = _latex_compiles(latex)
             if compiles is False:
                 raise LLMError("AI LaTeX did not compile after retry")
@@ -231,8 +310,16 @@ def _generate_one_page_latex(
     log.warning("Generated resume exceeded one page; regenerating with trim instruction")
     try:
         retry_latex = generate_latex_resume(
-            tailored, job_title, company, user_id, session, overflow_hint=True
+            tailored,
+            job_title,
+            company,
+            user_id,
+            session,
+            overflow_hint=True,
+            job_description=job_description,
+            contact_fields=contact_fields,
         )
+        retry_latex = _ensure_contact_in_latex(retry_latex, contact_fields or {})
     except LLMError:
         return latex, fits
 
@@ -256,22 +343,34 @@ def ensure_latex_source(
 
     job_title = job.title if job else "Role"
     company = job.company if job else "Company"
+    job_description = (job.description if job else "") or ""
     tailored = version.tailored_markdown or ""
-    ai_ok = _ai_tailored(version)
+    contact_fields = _resolve_contact_fields(session, version)
 
-    if ai_ok:
+    # Prefer LLM whenever a provider key is configured — even if earlier
+    # tailoring fell back locally ("LLM not configured" skill gap).
+    if _llm_available():
         try:
-            latex, fits = _generate_one_page_latex(tailored, job_title, company, version.user_id, session)
+            latex, fits = _generate_one_page_latex(
+                tailored,
+                job_title,
+                company,
+                version.user_id,
+                session,
+                job_description=job_description,
+                contact_fields=contact_fields,
+            )
             if fits is not False and _latex_compiles(latex) is not False:
                 version.latex_source = latex
                 session.flush()
                 return latex
             log.warning("LLM output failed compile/page checks; using structured template")
-        except LLMError:
-            log.warning("LLM LaTeX generation failed; using structured template")
+        except LLMError as exc:
+            log.warning("LLM LaTeX generation failed; using structured template: %s", exc)
 
-    latex = _build_one_page_structured_latex(tailored, job_title, company)
-    # Structured fallback must also compile when an engine is present.
+    latex = _build_one_page_structured_latex(
+        tailored, job_title, company, contact_overrides=contact_fields
+    )
     if _latex_compiles(latex) is False:
         log.warning("Structured LaTeX failed compile check; returning best-effort source")
     version.latex_source = latex
@@ -279,15 +378,30 @@ def ensure_latex_source(
     return latex
 
 
-def _build_one_page_structured_latex(tailored: str, job_title: str, company: str) -> str:
+def _build_one_page_structured_latex(
+    tailored: str,
+    job_title: str,
+    company: str,
+    *,
+    contact_overrides: dict[str, str] | None = None,
+) -> str:
     """Build the deterministic template-matching LaTeX, shrinking the per-section
     line cap if the compiled PDF still overflows one page."""
-    latex = build_structured_latex(tailored, job_title=job_title, company=company)
+    latex = build_structured_latex(
+        tailored,
+        job_title=job_title,
+        company=company,
+        contact_overrides=contact_overrides,
+    )
     for cap in (6, 3):
         if _fits_one_page(latex) is not False:
             return latex
         latex = build_structured_latex(
-            tailored, job_title=job_title, company=company, max_lines_per_section=cap
+            tailored,
+            job_title=job_title,
+            company=company,
+            max_lines_per_section=cap,
+            contact_overrides=contact_overrides,
         )
     return latex
 

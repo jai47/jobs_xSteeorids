@@ -64,15 +64,14 @@ def parse_resume_sections(text: str) -> ResumeStructure:
         return struct
 
     def _looks_like_contact(line: str) -> bool:
-        lower = line.lower()
-        return bool(
-            "@" in line
-            or _PHONE_RE.search(line)
-            or "linkedin" in lower
-            or "github" in lower
-            or "|" in line
-            or lower.startswith(("http://", "https://"))
-        )
+        lower = line.lower().strip()
+        # Local-format meta lines contain "@ company" but are not contact info.
+        if lower.startswith(("tailored for", "applying for", "target:")):
+            return False
+        has_email = bool(_EMAIL_RE.search(line))
+        has_phone = bool(_PHONE_RE.search(line))
+        has_link = "linkedin" in lower or "github" in lower or lower.startswith(("http://", "https://"))
+        return has_email or has_phone or has_link or ("|" in line and (has_email or has_phone or has_link))
 
     # Prefer a real person name for the title — never promote a phone/email line.
     # Uppercase names are common on resumes; only reject known section headers.
@@ -83,6 +82,8 @@ def parse_resume_sections(text: str) -> ResumeStructure:
             continue
         if cleaned in SECTION_HEADERS:
             continue
+        if cleaned.startswith(("tailored for", "applying for", "target:")):
+            continue
         name_idx = i
         break
     struct.name = non_empty[name_idx].strip()
@@ -90,6 +91,13 @@ def parse_resume_sections(text: str) -> ResumeStructure:
         struct.name = "Resume"
 
     idx = name_idx + 1
+    # Skip meta "Tailored for …" lines before the real contact row.
+    while idx < len(non_empty):
+        lower = non_empty[idx].strip().lower()
+        if lower.startswith(("tailored for", "applying for", "target:")):
+            idx += 1
+            continue
+        break
     if idx < len(non_empty) and _looks_like_contact(non_empty[idx]):
         struct.contact = non_empty[idx].strip()
         idx += 1
@@ -98,6 +106,9 @@ def parse_resume_sections(text: str) -> ResumeStructure:
     for line in non_empty[idx:]:
         stripped = line.strip()
         if not stripped or stripped in {"•", "-", "*"}:
+            continue
+        lower = stripped.lower()
+        if lower.startswith(("tailored for", "applying for", "target:")):
             continue
         if _is_section_header(stripped):
             title = stripped.rstrip(":").strip()
@@ -221,7 +232,12 @@ _EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")
 _PHONE_RE = re.compile(r"\+?\d[\d\s\-()]{7,}\d")
 
 
-def _extract_header_fields(contact: str, raw_text: str) -> dict[str, str]:
+def _extract_header_fields(
+    contact: str,
+    raw_text: str,
+    *,
+    overrides: dict[str, str] | None = None,
+) -> dict[str, str]:
     """Pull email/phone/github/linkedin out of the contact line and full text."""
     fields: dict[str, str] = {}
     email_match = _EMAIL_RE.search(contact) or _EMAIL_RE.search(raw_text)
@@ -230,13 +246,30 @@ def _extract_header_fields(contact: str, raw_text: str) -> dict[str, str]:
     phone_match = _PHONE_RE.search(contact) or _PHONE_RE.search(raw_text)
     if phone_match:
         fields["phone"] = phone_match.group(0).strip()
-    github_match = _GITHUB_RE.search(raw_text)
+    github_match = _GITHUB_RE.search(contact) or _GITHUB_RE.search(raw_text)
     if github_match:
         fields["github"] = github_match.group(0).rstrip(".,)")
-    linkedin_match = _LINKEDIN_RE.search(raw_text)
+    linkedin_match = _LINKEDIN_RE.search(contact) or _LINKEDIN_RE.search(raw_text)
     if linkedin_match:
         fields["linkedin"] = linkedin_match.group(0).rstrip(".,)")
+    if overrides:
+        for key, value in overrides.items():
+            if value and not fields.get(key):
+                fields[key] = value.strip()
     return fields
+
+
+def merge_contact_overrides(*sources: str) -> dict[str, str]:
+    """Union contact fields from master resume, tailored markdown, user email, etc."""
+    merged: dict[str, str] = {}
+    for source in sources:
+        if not source:
+            continue
+        chunk = _extract_header_fields("", source)
+        for key, value in chunk.items():
+            if value and not merged.get(key):
+                merged[key] = value
+    return merged
 
 
 _BULLET_PREFIXES = ("–", "—", "•", "▪", "‣", "·")
@@ -465,6 +498,7 @@ def build_structured_latex(
     job_title: str = "",
     company: str = "",
     max_lines_per_section: int = 10,
+    contact_overrides: dict[str, str] | None = None,
 ) -> str:
     """Render a one-page LaTeX resume matching resume_format/AI_Resume_Template_One_Page.tex,
     without an LLM: only the template's five canonical sections are emitted, in
@@ -476,7 +510,9 @@ def build_structured_latex(
     plain = _strip_markdown(raw_text)
     struct = parse_resume_sections(plain)
     name = _escape_latex(struct.name or "Resume")
-    header_fields = _extract_header_fields(struct.contact, raw_text)
+    header_fields = _extract_header_fields(
+        struct.contact, raw_text, overrides=contact_overrides
+    )
 
     header_segments = []
     if header_fields.get("email"):
@@ -501,10 +537,8 @@ def build_structured_latex(
     if header_segments:
         body_parts.append(" $|$\n".join(header_segments))
     body_parts.append(r"\end{tabularx}")
-    if job_title and company:
-        body_parts.append(
-            rf"{{\centering\small\textit{{Target: {_escape_latex(job_title)} @ {_escape_latex(company)}}}\par}}"
-        )
+    # No "Target: role @ company" line — the template's only subheading is the
+    # contact/communication row (email | phone | GitHub | LinkedIn).
 
     grouped = _group_by_canonical_section(struct)
     for canonical in CANONICAL_SECTION_ORDER:
