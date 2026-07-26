@@ -71,8 +71,8 @@ Return ONLY JSON: {{"latex_source": "<the filled-in template as a full document>
 
 OVERFLOW_SUFFIX = """
 
-Your previous attempt FAILED validation (did not compile, or exceeded one page).
-Regenerate carefully:
+Your previous attempt FAILED validation: it either did not compile with pdflatex,
+or it rendered MORE THAN ONE PAGE. Regenerate carefully:
 - Drop the least relevant Work Experience entry (keep at most 2) and/or Project.
 - Shorten every bullet to a single tight line.
 - Keep the exact same template structure, packages, and spacing — do not shrink
