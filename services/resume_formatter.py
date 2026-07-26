@@ -63,14 +63,34 @@ def parse_resume_sections(text: str) -> ResumeStructure:
     if not non_empty:
         return struct
 
-    struct.name = non_empty[0].strip()
-    idx = 1
-    if idx < len(non_empty) and (
-        "@" in non_empty[idx]
-        or re.search(r"\+?\d[\d\s\-()]{7,}", non_empty[idx])
-        or "|" in non_empty[idx]
-        or "linkedin" in non_empty[idx].lower()
-    ):
+    def _looks_like_contact(line: str) -> bool:
+        lower = line.lower()
+        return bool(
+            "@" in line
+            or _PHONE_RE.search(line)
+            or "linkedin" in lower
+            or "github" in lower
+            or "|" in line
+            or lower.startswith(("http://", "https://"))
+        )
+
+    # Prefer a real person name for the title — never promote a phone/email line.
+    # Uppercase names are common on resumes; only reject known section headers.
+    name_idx = 0
+    for i, line in enumerate(non_empty[:4]):
+        cleaned = line.strip().rstrip(":").lower()
+        if _looks_like_contact(line):
+            continue
+        if cleaned in SECTION_HEADERS:
+            continue
+        name_idx = i
+        break
+    struct.name = non_empty[name_idx].strip()
+    if _looks_like_contact(struct.name) or struct.name.strip().rstrip(":").lower() in SECTION_HEADERS:
+        struct.name = "Resume"
+
+    idx = name_idx + 1
+    if idx < len(non_empty) and _looks_like_contact(non_empty[idx]):
         struct.contact = non_empty[idx].strip()
         idx += 1
 
@@ -157,10 +177,13 @@ LATEX_PREAMBLE = r"""\documentclass[a4paper,8pt]{article}
 \usepackage{lmodern}
 \usepackage{parskip}
 \usepackage[scale=0.9,top=.4in,bottom=.4in]{geometry}
+\usepackage{tabularx}
+\usepackage{array}
 \usepackage{enumitem}
 \usepackage{titlesec}
 \usepackage{fontawesome5}
 \usepackage[colorlinks=true,urlcolor=black,linkcolor=black,citecolor=black]{hyperref}
+\newcolumntype{C}{>{\centering\arraybackslash}X}
 \titleformat{\section}{\Large\scshape\raggedright}{}{0em}{}[\titlerule]
 \titlespacing{\section}{1pt}{2pt}{2pt}
 \pagestyle{empty}
@@ -187,8 +210,13 @@ _SECTION_ALIASES = {
     "awards and certifications": "Awards and Certifications",
 }
 
-_GITHUB_RE = re.compile(r"https?://(?:www\.)?github\.com/\S+", re.I)
-_LINKEDIN_RE = re.compile(r"https?://(?:www\.)?linkedin\.com/\S+", re.I)
+_GITHUB_RE = re.compile(r"(?:https?://)?(?:www\.)?github\.com/[\w.\-/]+", re.I)
+_LINKEDIN_RE = re.compile(r"(?:https?://)?(?:www\.)?linkedin\.com/[\w.\-/]+", re.I)
+
+
+def _as_url(value: str) -> str:
+    """Resume text often omits the scheme; hyperref needs an absolute URL."""
+    return value if value.lower().startswith(("http://", "https://")) else f"https://{value}"
 _EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")
 _PHONE_RE = re.compile(r"\+?\d[\d\s\-()]{7,}\d")
 
@@ -209,6 +237,197 @@ def _extract_header_fields(contact: str, raw_text: str) -> dict[str, str]:
     if linkedin_match:
         fields["linkedin"] = linkedin_match.group(0).rstrip(".,)")
     return fields
+
+
+_BULLET_PREFIXES = ("–", "—", "•", "▪", "‣", "·")
+
+_DATE_TOKEN = (
+    r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?\s*\d{2,4}"
+    r"|\d{1,2}/\d{4}|\d{4}"
+)
+_DATE_RANGE_RE = re.compile(
+    rf"^(?:{_DATE_TOKEN})\s*(?:–|—|-{{1,2}}|to|until)\s*"
+    rf"(?:{_DATE_TOKEN}|present|current|now|ongoing|date)\.?$",
+    re.I,
+)
+_SINGLE_DATE_RE = re.compile(rf"^(?:{_DATE_TOKEN})\.?$", re.I)
+
+_ROLE_HINTS = (
+    "engineer", "developer", "intern", "manager", "analyst", "scientist",
+    "designer", "consultant", "lead", "architect", "specialist", "researcher",
+    "administrator", "associate", "director", "officer", "freelance", "trainee",
+)
+_ORG_HINTS = ("university", "institute", "college", "school", "academy", "polytechnic")
+
+_SKILL_LABEL_RE = re.compile(r"^([A-Z][A-Za-z0-9 /&+.-]{2,40}):\s*(.+)$")
+
+
+@dataclass
+class ResumeEntry:
+    """One job / degree / project: a bold heading, optional role line, date, bullets."""
+
+    heading: str = ""
+    subheading: str = ""
+    date: str = ""
+    bullets: list[str] = field(default_factory=list)
+
+
+def _is_date_line(line: str) -> bool:
+    return bool(_DATE_RANGE_RE.match(line) or _SINGLE_DATE_RE.match(line))
+
+
+def _is_bullet_line(line: str) -> bool:
+    return line.startswith(_BULLET_PREFIXES)
+
+
+def _strip_bullet_prefix(line: str) -> str:
+    return re.sub(r"^[–—•▪‣·\-\*]+\s*", "", line).strip()
+
+
+def _looks_like_role(text: str) -> bool:
+    lowered = text.lower()
+    return any(hint in lowered for hint in _ROLE_HINTS)
+
+
+def _looks_like_org(text: str) -> bool:
+    lowered = text.lower()
+    return any(hint in lowered for hint in _ORG_HINTS)
+
+
+def parse_section_entries(lines: list[str]) -> list[ResumeEntry]:
+    """Group flat resume lines into entries.
+
+    Text extracted from PDFs arrives flattened and often wrapped mid-sentence,
+    with dates interleaved from a second column. Dashed lines are achievements;
+    plain lines are headings; lines starting lowercase continue the previous
+    achievement instead of becoming their own bullet.
+    """
+    entries: list[ResumeEntry] = []
+    current: ResumeEntry | None = None
+    pending_date = ""
+
+    for raw in lines:
+        line = raw.strip()
+        if not line:
+            continue
+
+        if _is_date_line(line):
+            if current is not None and not current.date:
+                current.date = line
+            else:
+                pending_date = line
+            continue
+
+        if _is_bullet_line(line):
+            text = _strip_bullet_prefix(line)
+            if not text:
+                continue
+            if current is None:
+                current = ResumeEntry()
+                entries.append(current)
+            current.bullets.append(text)
+            continue
+
+        # Wrapped continuation of the previous achievement.
+        if current is not None and current.bullets and line[:1].islower():
+            current.bullets[-1] = f"{current.bullets[-1].rstrip()} {line}"
+            continue
+
+        # Continuation of a heading that wrapped before any bullets existed.
+        if current is not None and not current.bullets and line[:1].islower():
+            if current.subheading:
+                current.subheading = f"{current.subheading.rstrip()} {line}"
+            else:
+                current.heading = f"{current.heading.rstrip()} {line}"
+            continue
+
+        if current is None or current.bullets:
+            current = ResumeEntry(heading=line, date=pending_date)
+            pending_date = ""
+            entries.append(current)
+        elif not current.subheading:
+            current.subheading = line
+        else:
+            current.subheading = f"{current.subheading}, {line}"
+
+    return entries
+
+
+def _orient_entry(entry: ResumeEntry, canonical: str) -> ResumeEntry:
+    """Put the organisation on the bold line and the role/degree underneath."""
+    if not entry.subheading:
+        return entry
+
+    if canonical == "Work Experience":
+        if _looks_like_role(entry.heading) and not _looks_like_role(entry.subheading):
+            entry.heading, entry.subheading = entry.subheading, entry.heading
+    elif canonical == "Education":
+        if not _looks_like_org(entry.heading) and _looks_like_org(entry.subheading):
+            entry.heading, entry.subheading = entry.subheading, entry.heading
+    return entry
+
+
+def _render_entry(entry: ResumeEntry, *, bullet_budget: int) -> tuple[list[str], int]:
+    """Render one entry as a header row plus achievement bullets."""
+    parts: list[str] = []
+    heading = entry.heading.strip()
+    subheading = entry.subheading.strip()
+
+    # "Project | Tech, Stack" -> bold name, italic stack.
+    if "|" in heading and not subheading:
+        name, _, stack = heading.partition("|")
+        heading = name.strip()
+        subheading = stack.strip()
+
+    if heading or entry.date:
+        parts.append(r"\begin{tabularx}{\linewidth}{@{}Xr@{}}")
+        parts.append(
+            rf"\textbf{{{_escape_latex(heading)}}} & {_escape_latex(entry.date)}\\"
+        )
+        if subheading:
+            parts.append(rf"\textit{{{_escape_latex(subheading)}}} & \\")
+        parts.append(r"\end{tabularx}")
+    elif subheading:
+        parts.append(rf"\textit{{{_escape_latex(subheading)}}}")
+
+    used = 0
+    bullets = [b for b in entry.bullets if b.strip()][:bullet_budget]
+    if bullets:
+        parts.append(r"\begin{itemize}[leftmargin=1.4em,itemsep=1pt,topsep=2pt,parsep=0pt]")
+        for bullet in bullets:
+            parts.append(rf"\item {_escape_latex(bullet.strip())}")
+            used += 1
+        parts.append(r"\end{itemize}")
+
+    return parts, used
+
+
+def _render_skills(lines: list[str], max_lines: int) -> list[str]:
+    """Render skills as labelled rows (Languages: ...) instead of one blob."""
+    parts: list[str] = []
+    labelled: list[tuple[str, str]] = []
+    loose: list[str] = []
+
+    for line in lines[:max_lines]:
+        cleaned = _strip_bullet_prefix(line)
+        if not cleaned:
+            continue
+        match = _SKILL_LABEL_RE.match(cleaned)
+        if match:
+            labelled.append((match.group(1).strip(), match.group(2).strip()))
+        elif labelled:
+            label, value = labelled[-1]
+            labelled[-1] = (label, f"{value} {cleaned}")
+        else:
+            loose.append(cleaned)
+
+    if loose:
+        parts.append(_escape_latex(", ".join(loose)))
+    for label, value in labelled:
+        parts.append(
+            rf"\textbf{{{_escape_latex(label)}:}} {_escape_latex(value.rstrip(', '))}\\"
+        )
+    return parts
 
 
 def _group_by_canonical_section(struct: ResumeStructure) -> dict[str, list[str]]:
@@ -265,22 +484,26 @@ def build_structured_latex(
     if header_fields.get("phone"):
         header_segments.append(rf"\faMobile\ {_escape_latex(header_fields['phone'])}")
     if header_fields.get("github"):
-        header_segments.append(rf"\href{{{header_fields['github']}}}{{\faGithub\ GitHub}}")
+        header_segments.append(
+            rf"\href{{{_as_url(header_fields['github'])}}}{{\faGithub\ GitHub}}"
+        )
     if header_fields.get("linkedin"):
-        header_segments.append(rf"\href{{{header_fields['linkedin']}}}{{\faLinkedin\ LinkedIn}}")
+        header_segments.append(
+            rf"\href{{{_as_url(header_fields['linkedin'])}}}{{\faLinkedin\ LinkedIn}}"
+        )
 
     body_parts: list[str] = [
         LATEX_PREAMBLE,
         r"\begin{document}",
-        r"\begin{center}",
+        r"\begin{tabularx}{\linewidth}{@{}C@{}}",
         rf"{{\Huge \textbf{{{name}}}}}\\[6pt]",
     ]
     if header_segments:
         body_parts.append(" $|$\n".join(header_segments))
-    body_parts.append(r"\end{center}")
+    body_parts.append(r"\end{tabularx}")
     if job_title and company:
         body_parts.append(
-            rf"\small\textit{{Target: {_escape_latex(job_title)} @ {_escape_latex(company)}}}"
+            rf"{{\centering\small\textit{{Target: {_escape_latex(job_title)} @ {_escape_latex(company)}}}\par}}"
         )
 
     grouped = _group_by_canonical_section(struct)
@@ -289,13 +512,30 @@ def build_structured_latex(
         if not lines:
             continue
         body_parts.append(rf"\section{{{canonical}}}")
+
         if canonical == "Skills":
-            body_parts.append(_escape_latex(", ".join(lines[:max_lines_per_section])))
-        else:
-            body_parts.append(r"\begin{itemize}[leftmargin=2em,itemsep=2pt]")
+            body_parts.extend(_render_skills(lines, max_lines_per_section))
+            continue
+
+        if canonical == "Awards and Certifications":
+            body_parts.append(r"\begin{itemize}[leftmargin=1.4em,itemsep=1pt,topsep=2pt,parsep=0pt]")
             for line in lines[:max_lines_per_section]:
-                body_parts.append(rf"\item {_escape_latex(line)}")
+                cleaned = _strip_bullet_prefix(line)
+                if cleaned:
+                    body_parts.append(rf"\item {_escape_latex(cleaned)}")
             body_parts.append(r"\end{itemize}")
+            continue
+
+        entries = [
+            _orient_entry(entry, canonical) for entry in parse_section_entries(lines)
+        ]
+        remaining = max_lines_per_section
+        for entry in entries:
+            if remaining <= 0 and not entry.heading:
+                continue
+            rendered, used = _render_entry(entry, bullet_budget=max(remaining, 0))
+            body_parts.extend(rendered)
+            remaining -= used
 
     body_parts.append(r"\end{document}")
     return "\n".join(body_parts)

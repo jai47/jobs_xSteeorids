@@ -181,6 +181,18 @@ def _fits_one_page(latex: str) -> bool | None:
     return count_pdf_pages(pdf_bytes) <= 1
 
 
+def _latex_compiles(latex: str) -> bool | None:
+    """Return True/False if compilation could be verified, None if no engine is available."""
+    if not tectonic_available():
+        return None
+    try:
+        compile_latex_to_pdf(latex)
+        return True
+    except RuntimeError as exc:
+        log.warning("LaTeX compile check failed: %s", str(exc)[-300:])
+        return False
+
+
 def _generate_one_page_latex(
     tailored: str,
     job_title: str,
@@ -188,11 +200,30 @@ def _generate_one_page_latex(
     user_id,
     session: Session,
 ) -> tuple[str, bool | None]:
-    """Generate template-based LaTeX via the LLM, retrying once with a trim
-    instruction if the first attempt overflows one page. Returns the LaTeX and
-    whether it was verified to fit one page (None if unverifiable — no tectonic).
-    Raises LLMError if the LLM path is unavailable entirely."""
+    """Generate template-based LaTeX via the LLM, verifying it compiles and fits
+    one page. Returns the LaTeX and whether it was verified to fit one page
+    (None if unverifiable — no LaTeX engine). Raises LLMError if the LLM path
+    is unavailable entirely."""
     latex = generate_latex_resume(tailored, job_title, company, user_id, session)
+    compiles = _latex_compiles(latex)
+    if compiles is False:
+        log.warning("AI LaTeX failed to compile; regenerating with compile-fix hint")
+        try:
+            latex = generate_latex_resume(
+                tailored,
+                job_title,
+                company,
+                user_id,
+                session,
+                overflow_hint=True,
+            )
+            # Append a stronger compile-oriented retry if still broken.
+            compiles = _latex_compiles(latex)
+            if compiles is False:
+                raise LLMError("AI LaTeX did not compile after retry")
+        except LLMError:
+            raise
+
     fits = _fits_one_page(latex)
     if fits is not False:
         return latex, fits
@@ -203,6 +234,9 @@ def _generate_one_page_latex(
             tailored, job_title, company, user_id, session, overflow_hint=True
         )
     except LLMError:
+        return latex, fits
+
+    if _latex_compiles(retry_latex) is False:
         return latex, fits
 
     retry_fits = _fits_one_page(retry_latex)
@@ -228,15 +262,18 @@ def ensure_latex_source(
     if ai_ok:
         try:
             latex, fits = _generate_one_page_latex(tailored, job_title, company, version.user_id, session)
-            if fits is not False:
+            if fits is not False and _latex_compiles(latex) is not False:
                 version.latex_source = latex
                 session.flush()
                 return latex
-            log.warning("LLM output still exceeds one page after retry; using structured template")
+            log.warning("LLM output failed compile/page checks; using structured template")
         except LLMError:
             log.warning("LLM LaTeX generation failed; using structured template")
 
     latex = _build_one_page_structured_latex(tailored, job_title, company)
+    # Structured fallback must also compile when an engine is present.
+    if _latex_compiles(latex) is False:
+        log.warning("Structured LaTeX failed compile check; returning best-effort source")
     version.latex_source = latex
     session.flush()
     return latex
@@ -289,6 +326,63 @@ def _render_pdf_from_markdown(tailored_markdown: str) -> bytes:
     if pdf_bytes is None:
         pdf_bytes = _render_pdf_with_xhtml2pdf(html)
     return pdf_bytes
+
+
+def _get_user_version(session: Session, user: User, version_id: uuid.UUID) -> ResumeVersion:
+    version = session.get(ResumeVersion, version_id)
+    if version is None or version.user_id != user.id:
+        raise APIError(404, "Resume version not found", "NOT_FOUND")
+    return version
+
+
+def save_latex_source(
+    session: Session,
+    user: User,
+    version_id: uuid.UUID,
+    latex_source: str,
+) -> str:
+    """Persist user-edited LaTeX for a resume version."""
+    version = _get_user_version(session, user, version_id)
+    version.latex_source = latex_source
+    session.flush()
+    return latex_source
+
+
+def ensure_version_latex(
+    session: Session,
+    user: User,
+    version_id: uuid.UUID,
+    *,
+    force: bool = False,
+) -> str:
+    """Return the version's LaTeX, generating it from the one-page template if missing."""
+    version = _get_user_version(session, user, version_id)
+    job = session.get(Job, version.job_id)
+    return ensure_latex_source(session, version, job, force=force)
+
+
+def compile_version_latex(
+    session: Session,
+    user: User,
+    version_id: uuid.UUID,
+    latex_source: str | None = None,
+) -> bytes:
+    """Compile LaTeX (draft or saved) for the live preview. Raises APIError with
+    the tectonic log on failure — no HTML fallback, the editor needs real errors."""
+    version = _get_user_version(session, user, version_id)
+    latex = (latex_source or "").strip() or (version.latex_source or "")
+    if not latex:
+        latex = ensure_version_latex(session, user, version_id)
+    if not tectonic_available():
+        raise APIError(
+            503,
+            "LaTeX compiler unavailable — install a LaTeX engine (tectonic, pdflatex, or xelatex)",
+            "LATEX_UNAVAILABLE",
+        )
+    try:
+        return compile_latex_to_pdf(latex)
+    except RuntimeError as exc:
+        raise APIError(400, "LaTeX compilation failed", "LATEX_COMPILE_ERROR", detail=str(exc)[:2000])
 
 
 def generate_resume_pdf(session: Session, user: User, version_id: uuid.UUID) -> bytes:

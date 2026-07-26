@@ -48,6 +48,19 @@ Below is the EXACT LaTeX template you must fill in. Copy it verbatim — same
 7. The compiled document MUST be exactly ONE page. If content is long, shorten
    bullet wording and drop the least relevant entries — do NOT shrink fonts,
    margins, or spacing below what the template already specifies.
+8. The Huge title line MUST contain ONLY the candidate's full name — never phone,
+   email, LinkedIn, GitHub, or other contact text. Put those only on the contact
+   line with \\faEnvelope / \\faMobile / \\faGithub / \\faLinkedin.
+9. Output must be valid pdflatex that compiles without errors. Never leave
+   unresolved brackets like [FULL NAME]. Never put a line starting with "["
+   immediately after "\\\\" (wrap such text in \\mbox{{...}} if needed).
+10. NEVER put a company name, job title, employer, school, degree, project name,
+   tech stack, or date inside an \\item. Those belong ONLY in the tabularx header
+   block (bold company/school/project + right-aligned date, italic role/degree).
+   \\item is reserved for achievement sentences.
+11. Each \\item must be ONE complete sentence. The source resume text may be
+   wrapped mid-sentence across lines — join those fragments back into a single
+   \\item instead of emitting a bullet per line fragment.
 
 --- TEMPLATE START ---
 {template}
@@ -58,12 +71,16 @@ Return ONLY JSON: {{"latex_source": "<the filled-in template as a full document>
 
 OVERFLOW_SUFFIX = """
 
-Your previous attempt compiled to MORE THAN ONE PAGE. Regenerate, this time:
+Your previous attempt FAILED validation (did not compile, or exceeded one page).
+Regenerate carefully:
 - Drop the least relevant Work Experience entry (keep at most 2) and/or Project.
 - Shorten every bullet to a single tight line.
 - Keep the exact same template structure, packages, and spacing — do not shrink
   fonts or margins to force a fit.
-It MUST fit on one page.
+- Huge title = full name ONLY. Contact icons on the next line only.
+- Ensure the LaTeX compiles with pdflatex (balanced braces, no bare "[" after \\\\).
+- Never bullet a company, role, school, degree, project name, stack, or date.
+It MUST compile and fit on one page.
 """
 
 
