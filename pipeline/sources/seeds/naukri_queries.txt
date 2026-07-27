@@ -1,0 +1,12 @@
+# Naukri search queries: keyword|location
+# Location may be blank for nationwide search.
+machine learning|bangalore
+machine learning|hyderabad
+machine learning|pune
+ml engineer|bangalore
+data scientist|bangalore
+data scientist|mumbai
+ai engineer|bangalore
+llm engineer|bangalore
+computer vision|bangalore
+generative ai|bangalore

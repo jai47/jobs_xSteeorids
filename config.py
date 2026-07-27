@@ -71,6 +71,10 @@ class Settings(BaseSettings):
     api_base_url: str = "http://localhost:8000"
     notification_drain_interval_min: int = 15
 
+    # Adzuna India job board (https://developer.adzuna.com/signup). Empty = skip source.
+    adzuna_app_id: str = ""
+    adzuna_app_key: str = ""
+
     @property
     def cors_origins_list(self) -> list[str]:
         return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]

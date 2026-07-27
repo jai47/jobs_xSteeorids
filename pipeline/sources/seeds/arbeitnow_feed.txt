@@ -1,0 +1,2 @@
+# Arbeitnow is a paginated public feed — no board seeds required.
+# This file exists so BaseSource.seed_filename is defined; fetch ignores seeds.

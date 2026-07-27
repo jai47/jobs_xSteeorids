@@ -1,0 +1,9 @@
+# Adzuna India (country=in) search keywords
+machine learning engineer
+ml engineer
+data scientist
+ai engineer
+llm engineer
+computer vision engineer
+generative ai
+applied scientist

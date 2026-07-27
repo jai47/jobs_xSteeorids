@@ -7,14 +7,28 @@ import logging
 
 from typing import Callable
 
+from pipeline.sources.adzuna import AdzunaSource
+from pipeline.sources.arbeitnow import ArbeitnowSource
 from pipeline.sources.ashby import AshbySource
 from pipeline.sources.base import BaseSource, JobDict
 from pipeline.sources.greenhouse import GreenhouseSource
 from pipeline.sources.lever import LeverSource
+from pipeline.sources.naukri import NaukriSource
+from pipeline.sources.remoteok import RemoteOKSource
+from pipeline.sources.remotive import RemotiveSource
 
 log = logging.getLogger(__name__)
 
-SOURCES: list[type[BaseSource]] = [GreenhouseSource, LeverSource, AshbySource]
+SOURCES: list[type[BaseSource]] = [
+    GreenhouseSource,
+    LeverSource,
+    AshbySource,
+    RemotiveSource,
+    RemoteOKSource,
+    ArbeitnowSource,
+    AdzunaSource,
+    NaukriSource,
+]
 
 
 async def fetch_all_sources(
