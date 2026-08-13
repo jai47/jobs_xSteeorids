@@ -1,6 +1,35 @@
 from pathlib import Path
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+def normalize_database_url(raw: str) -> str:
+    """Turn a Postgres URI into a SQLAlchemy+psycopg2 URL with SSL when needed.
+
+    Accepts `postgres://` and `postgresql://` (Supabase dashboard copies).
+    Adds `sslmode=require` for non-local hosts when the query string omits it.
+    """
+    url = raw.strip()
+    if not url:
+        return url
+    if url.startswith("postgres://"):
+        url = "postgresql+psycopg2://" + url[len("postgres://") :]
+    elif url.startswith("postgresql+psycopg2://"):
+        pass
+    elif url.startswith("postgresql://"):
+        url = "postgresql+psycopg2://" + url[len("postgresql://") :]
+
+    parsed = urlparse(url)
+    hostname = (parsed.hostname or "").lower()
+    local = hostname in {"localhost", "127.0.0.1", "db", ""}
+    query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+    if not local and "sslmode" not in {key.lower() for key in query}:
+        query["sslmode"] = "require"
+        parsed = parsed._replace(query=urlencode(query))
+        url = urlunparse(parsed)
+    return url
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _ENV_FILE = _REPO_ROOT / ".env"
@@ -13,6 +42,7 @@ class Settings(BaseSettings):
         env_file=str(_ENV_FILE),
         env_file_encoding="utf-8",
         extra="ignore",
+        populate_by_name=True,
     )
 
     db_user: str = "copilot"
@@ -20,6 +50,8 @@ class Settings(BaseSettings):
     db_name: str = "career_copilot"
     db_host: str = "db"
     db_port: int = 5432
+    # Full URI override (Supabase / Neon / Railway). When set, DB_* parts are ignored.
+    database_url_override: str = Field(default="", validation_alias="DATABASE_URL")
 
     # auto | groq | anthropic | deepseek | google | kimi | azure | aws | opencode | local | openai
     llm_provider: str = "auto"
@@ -81,10 +113,22 @@ class Settings(BaseSettings):
 
     @property
     def database_url(self) -> str:
+        override = (self.database_url_override or "").strip()
+        if override:
+            return normalize_database_url(override)
         return (
             f"postgresql+psycopg2://{self.db_user}:{self.db_password}"
             f"@{self.db_host}:{self.db_port}/{self.db_name}"
         )
+
+    @property
+    def uses_pgbouncer(self) -> bool:
+        """True when DATABASE_URL points at a transaction pooler (Supabase :6543)."""
+        url = self.database_url.lower()
+        parsed = urlparse(url)
+        port = parsed.port
+        host = parsed.hostname or ""
+        return port == 6543 or "pooler.supabase.com" in host
 
     @property
     def is_production(self) -> bool:
@@ -94,11 +138,10 @@ class Settings(BaseSettings):
         """Refuse to boot in production with insecure default secrets."""
         if not self.is_production:
             return
-        insecure = [
-            name
-            for name, value in (("DASHBOARD_SECRET", self.dashboard_secret), ("DB_PASSWORD", self.db_password))
-            if value == "changeme"
-        ]
+        checks: list[tuple[str, str]] = [("DASHBOARD_SECRET", self.dashboard_secret)]
+        if not (self.database_url_override or "").strip():
+            checks.append(("DB_PASSWORD", self.db_password))
+        insecure = [name for name, value in checks if value == "changeme"]
         if insecure:
             raise RuntimeError(
                 "Refusing to start with APP_ENV=production while insecure default value(s) "
