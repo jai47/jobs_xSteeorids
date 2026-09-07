@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
@@ -94,7 +95,11 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     pipeline_cron_hour: int = 2
     resume_storage_path: str = str(_REPO_ROOT / "resumes")
-    cors_origins: str = "http://localhost:3000,http://localhost:5173"
+    cors_origins: str = (
+        "http://localhost:3000,http://localhost:5173,"
+        "https://ai-career-copilot-gold-gamma.vercel.app,"
+        "https://jobs.spanwrap.com"
+    )
 
     email_provider: str = "console"
     resend_api_key: str = ""
@@ -109,7 +114,35 @@ class Settings(BaseSettings):
 
     @property
     def cors_origins_list(self) -> list[str]:
-        return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
+        """Origins allowed by CORS. Trailing slashes and quotes are stripped.
+
+        APP_BASE_URL is always included so a Vercel URL set there works even if
+        CORS_ORIGINS was left as localhost.
+        """
+        seen: set[str] = set()
+        origins: list[str] = []
+        candidates = [part for part in self.cors_origins.split(",")]
+        candidates.append(self.app_base_url)
+        for raw in candidates:
+            origin = raw.strip().strip("\"'").rstrip("/")
+            if not origin or origin in seen or not origin.startswith("http"):
+                continue
+            seen.add(origin)
+            origins.append(origin)
+        return origins
+
+    @property
+    def cors_origin_regex(self) -> str:
+        """Allow Vercel URLs and any https host already listed in CORS_ORIGINS / APP_BASE_URL."""
+        hosts = [
+            r"([a-z0-9-]+\.)*vercel\.app",
+            r"([a-z0-9-]+\.)*spanwrap\.com",
+        ]
+        for origin in self.cors_origins_list:
+            hostname = urlparse(origin).hostname or ""
+            if hostname and "vercel.app" not in hostname:
+                hosts.append(re.escape(hostname))
+        return r"https://(" + "|".join(hosts) + r")"
 
     @property
     def database_url(self) -> str:

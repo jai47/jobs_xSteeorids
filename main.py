@@ -6,11 +6,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from api.deps import register_exception_handlers
 from api.routes import api_router
 from config import settings
+from db.bootstrap import ensure_schema
 from scheduler import shutdown_scheduler, start_scheduler
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Empty Supabase / mis-migrated DBs: create missing tables before cron jobs run.
+    ensure_schema()
     start_scheduler()
     yield
     shutdown_scheduler()
@@ -22,6 +25,7 @@ app = FastAPI(title="AI Career Copilot API", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins_list,
+    allow_origin_regex=settings.cors_origin_regex,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
