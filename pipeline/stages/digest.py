@@ -170,6 +170,63 @@ def save_daily_digest(
     return digest
 
 
+def build_digest_metrics(
+    *,
+    metrics: dict[str, int],
+    opportunities: list[dict],
+    trending: list[tuple[str, int]],
+) -> dict[str, Any]:
+    """Structured brief payload for the Digest UI (alongside content_text)."""
+    digest_eligible = [
+        opp for opp in opportunities if opp.get("overall_score", 0) >= DIGEST_MIN_SCORE
+    ]
+    top = max(opportunities, key=lambda item: item.get("overall_score", 0), default=None)
+
+    country_counts: dict[str, int] = {}
+    for opp in digest_eligible:
+        country = (opp.get("country") or "Unknown").upper()
+        country_counts[country] = country_counts.get(country, 0) + 1
+
+    top_payload = None
+    if top is not None:
+        top_payload = {
+            "title": top.get("title", "N/A"),
+            "company": top.get("company", "N/A"),
+            "location": top.get("country") or "Unknown",
+            "remote": top.get("remote_type") or "unknown",
+            "score": top.get("overall_score", 0),
+            "classification": top.get("classification", "skip"),
+            "visa_status": top.get("visa_status", "unknown"),
+            "visa_score": top.get("score_visa", 0),
+            "salary": top.get("salary_display") or "Not listed",
+            "fit_reasoning": top.get("fit_reasoning", ""),
+            "visa_reasoning": top.get("visa_reasoning", ""),
+        }
+
+    return {
+        "discovered": metrics.get("discovered", 0),
+        "after_dedup": metrics.get("after_dedup", 0),
+        "scored": metrics.get("scored", 0),
+        "top_count": len(digest_eligible),
+        "min_score": int(DIGEST_MIN_SCORE),
+        "brief": {
+            "discovered": metrics.get("discovered", 0),
+            "after_dedup": metrics.get("after_dedup", 0),
+            "scored": metrics.get("scored", 0),
+            "top_count": len(digest_eligible),
+            "min_score": int(DIGEST_MIN_SCORE),
+            "trending": [
+                {"company": company, "new_roles": count} for company, count in trending
+            ],
+            "countries": [
+                {"country": country, "count": count}
+                for country, count in sorted(country_counts.items())
+            ],
+            "top": top_payload,
+        },
+    }
+
+
 def generate_digest_for_user(
     session: Session,
     user: User,
@@ -191,7 +248,11 @@ def generate_digest_for_user(
         user,
         digest_date,
         content,
-        {**metrics, "top_count": len([o for o in opportunities if o.get("overall_score", 0) >= DIGEST_MIN_SCORE])},
+        build_digest_metrics(
+            metrics=metrics,
+            opportunities=opportunities,
+            trending=trending,
+        ),
     )
 
 
