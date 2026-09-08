@@ -16,6 +16,11 @@ from sqlalchemy.orm import Session
 from db.models import Job, PipelineRun, ScoredOpportunity, User
 from pipeline.cancel import PipelineCancelled, is_cancel_requested
 from pipeline.progress import STAGE_LABELS, append_progress, reset_progress
+from pipeline.role_targets import (
+    RoleProfile,
+    build_role_profile_for_user,
+    filter_jobs_by_role,
+)
 from pipeline.sources.base import JobDict
 from pipeline.sources.registry import fetch_all_sources_sync
 from pipeline.stages.blacklist import apply_blacklist
@@ -31,7 +36,11 @@ from pipeline.stages.overall_scorer import score_overall
 from pipeline.stages.overall_scorer import DIGEST_MIN_SCORE
 from pipeline.stages.skill_gap import maybe_generate_skill_gap_reports
 from pipeline.stages.visa_scorer import score_visa
-from services.onboarding import sync_user_skills_from_resume, user_has_active_resume
+from services.onboarding import (
+    sync_user_roles_from_resume,
+    sync_user_skills_from_resume,
+    user_has_active_resume,
+)
 
 log = logging.getLogger(__name__)
 
@@ -181,6 +190,15 @@ class NightlyPipeline:
         self._errors: list[str] = []
         self._cancel_user_id = users[0].id if len(users) == 1 else None
         self.resume_from = resume_from if resume_from in PIPELINE_STAGE_ORDER else None
+        self._role_profiles: dict[object, RoleProfile] = {}
+
+    def _role_profile_for(self, user: User) -> RoleProfile:
+        """Cache the user's target role universe for the duration of the run."""
+        profile = self._role_profiles.get(user.id)
+        if profile is None:
+            profile = build_role_profile_for_user(self.session, user)
+            self._role_profiles[user.id] = profile
+        return profile
 
     def _should_run(self, stage: str) -> bool:
         if self.resume_from is None:
@@ -502,9 +520,21 @@ class NightlyPipeline:
             if self.run is not None:
                 append_progress(self.session, self.run, stage="discover", message=message)
 
-        if self.fetch_fn is fetch_all_sources_sync:
-            return fetch_all_sources_sync(progress_callback=on_progress)
-        return self.fetch_fn()
+        if self.fetch_fn is not fetch_all_sources_sync:
+            return self.fetch_fn()
+
+        role_profile = self._role_profile_for(self.users[0])
+        if self.run is not None:
+            append_progress(
+                self.session,
+                self.run,
+                stage="discover",
+                message=f"Targeting roles: {role_profile.describe()}",
+            )
+        return fetch_all_sources_sync(
+            progress_callback=on_progress,
+            role_profile=role_profile,
+        )
 
     def _deduplicate(self, jobs: list[JobDict]) -> list[JobDict]:
         return deduplicate(jobs).jobs
@@ -578,6 +608,7 @@ class NightlyPipeline:
             return [], 0, 0
 
         sync_user_skills_from_resume(self.session, user)
+        sync_user_roles_from_resume(self.session, user)
         if not user.parsed_skills:
             log.warning(
                 "Scoring user %s with no parsed skills — fit scores may be low",
@@ -585,6 +616,21 @@ class NightlyPipeline:
             )
 
         user_jobs = apply_blacklist(jobs, user)
+        role_profile = self._role_profile_for(user)
+        on_target = filter_jobs_by_role(user_jobs, role_profile)
+        off_target = len(user_jobs) - len(on_target)
+        if off_target and self.run is not None:
+            append_progress(
+                self.session,
+                self.run,
+                stage="score",
+                message=(
+                    f"Skipped {off_target} jobs outside {user.email}'s target roles "
+                    f"({role_profile.describe()})"
+                ),
+            )
+        user_jobs = on_target
+
         scored_opportunities: list[ScoredJobDict] = []
         top_count = 0
         digest_date = date.today()

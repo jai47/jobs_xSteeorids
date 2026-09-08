@@ -7,6 +7,12 @@ from __future__ import annotations
 
 from typing import TypedDict
 
+from pipeline.role_targets import (
+    families_for_text,
+    normalise_title as normalise_role_title,
+    primary_family_for,
+    title_matches_custom_roles,
+)
 from skills.synonyms import normalise_skill
 
 
@@ -20,22 +26,46 @@ class FitScoreResult(TypedDict):
     fit_reasoning: str
 
 
-ROLE_GROUPS: dict[str, list[str]] = {
-    "ml_engineer": ["machine learning engineer", "ml engineer", "applied ml"],
-    "ai_engineer": ["ai engineer", "artificial intelligence engineer", "applied ai"],
-    "data_scientist": ["data scientist", "senior data scientist", "staff data scientist"],
-    "cv_engineer": ["computer vision engineer", "cv engineer"],
-    "llm_engineer": ["llm engineer", "llm researcher", "generative ai engineer"],
-    "ai_platform": ["ai platform engineer", "ml platform", "ml infrastructure"],
-}
+# Role match is scored against the shared role-family taxonomy so a title the
+# user never targets cannot quietly score the same as one they did.
+ROLE_MATCH_EXACT = 100.0
+ROLE_MATCH_NO_PREFERENCE = 60.0
+ROLE_MATCH_UNKNOWN_TITLE = 45.0
+ROLE_MATCH_WRONG_FAMILY = 10.0
 
 
-def _role_group(title: str) -> str | None:
-    lowered = title.lower()
-    for group, variants in ROLE_GROUPS.items():
-        if any(variant in lowered for variant in variants):
-            return group
-    return None
+def _preferred_role_match(job_title: str, preferred_roles: list[str]) -> bool:
+    """True when the job title matches a preferred role by phrase or distinctive token."""
+    normalised = normalise_role_title(job_title)
+    keywords = [normalise_role_title(role) for role in preferred_roles if str(role).strip()]
+    keywords = [keyword for keyword in keywords if keyword]
+    if not keywords:
+        return False
+    if any(f" {keyword} " in f" {normalised} " for keyword in keywords):
+        return True
+    return title_matches_custom_roles(normalised, keywords)
+
+
+def _score_role(job_title: str, preferred_roles: list[str]) -> tuple[float, str]:
+    cleaned_prefs = [role for role in preferred_roles if str(role).strip()]
+    user_families: set[str] = set()
+    for role in cleaned_prefs:
+        user_families |= families_for_text(role)
+
+    if not cleaned_prefs:
+        return ROLE_MATCH_NO_PREFERENCE, "no role preference on file"
+
+    if _preferred_role_match(job_title, cleaned_prefs):
+        return ROLE_MATCH_EXACT, "matches preference"
+
+    job_family = primary_family_for(job_title)
+    if user_families:
+        if job_family is not None and job_family in user_families:
+            return ROLE_MATCH_EXACT, "matches preference"
+        return ROLE_MATCH_WRONG_FAMILY, "different role family than preferred"
+
+    # Non-IT preferences: anything that doesn't match their wording is a miss.
+    return ROLE_MATCH_WRONG_FAMILY, "does not match preferred roles"
 
 
 def score_fit(job: dict, user) -> FitScoreResult:
@@ -49,9 +79,9 @@ def score_fit(job: dict, user) -> FitScoreResult:
     else:
         skill_match = 50.0
 
-    job_group = _role_group(job.get("title", ""))
-    user_groups = [_role_group(role) for role in (user.preferred_roles or [])]
-    role_match = 100.0 if job_group and job_group in user_groups else 40.0
+    role_match, role_reason = _score_role(
+        job.get("title", ""), list(user.preferred_roles or [])
+    )
 
     job_exp = job.get("experience_min") or 0
     user_exp = user.years_experience or 0
@@ -93,7 +123,7 @@ def score_fit(job: dict, user) -> FitScoreResult:
     reasoning = (
         f"Skills: {len(required & user_skills)}/{len(required)} matched"
         f"{' (' + ', '.join(matched_list) + ')' if matched_list else ''}. "
-        f"Role: {'matches preference' if role_match == 100 else 'partial match'}. "
+        f"Role: {role_reason}. "
         f"Experience: {user_exp}yrs vs {job_exp} required."
     )
 

@@ -15,11 +15,22 @@ from db.models import Company
 def update_company_universe(scored_jobs: list[dict], session: Session) -> None:
     """Upsert company records from scored job discoveries."""
     today = date.today()
-    for job in scored_jobs:
-        company = session.query(Company).filter_by(name=job["company"]).first()
-        visa_score = job.get("score_visa")
+    # Cache pending inserts so duplicate company names in the same batch
+    # (e.g. Databricks IN + Databricks DE) update one row instead of colliding.
+    pending: dict[str, Company] = {}
 
-        if company:
+    for job in scored_jobs:
+        name = (job.get("company") or "").strip()
+        if not name:
+            continue
+        visa_score = job.get("score_visa")
+        company = pending.get(name)
+        if company is None:
+            company = session.query(Company).filter_by(name=name).first()
+            if company is not None:
+                pending[name] = company
+
+        if company is not None:
             company.ai_job_count = (company.ai_job_count or 0) + 1
             company.last_seen = today
             if visa_score is not None:
@@ -30,7 +41,7 @@ def update_company_universe(scored_jobs: list[dict], session: Session) -> None:
                 company.is_visa_friendly = company.visa_score_avg >= 60
         else:
             company = Company(
-                name=job["company"],
+                name=name,
                 country=job.get("country"),
                 careers_url=job.get("url"),
                 ats_type=job.get("source"),
@@ -41,5 +52,6 @@ def update_company_universe(scored_jobs: list[dict], session: Session) -> None:
                 is_visa_friendly=(visa_score or 0) >= 60,
             )
             session.add(company)
+            pending[name] = company
 
     session.flush()

@@ -51,7 +51,7 @@ class AdzunaSource(BaseSource):
                 progress_callback("adzuna: skipped (no API keys)")
             return []
 
-        seeds = self.load_seeds()
+        seeds = self.search_queries()
         jobs: list[JobDict] = []
         seen_ids: set[str] = set()
         total = len(seeds)

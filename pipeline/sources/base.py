@@ -11,6 +11,8 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import List, Optional, TypedDict
 
+from pipeline.role_targets import RoleProfile
+
 log = logging.getLogger(__name__)
 
 SEEDS_DIR = Path(__file__).resolve().parent / "seeds"
@@ -40,12 +42,13 @@ class BaseSource(ABC):
     Returns a list of JobDicts matching the unified schema.
     Must handle its own rate limiting, retries, and error handling.
     Must discard postings older than 30 days.
-    Must discard roles not matching TARGET_ROLES.
+    Must discard roles outside the run's target roles.
     """
 
     source_name: str
     seed_filename: str
 
+    # Used only when a run supplies no RoleProfile (scripts, tests, ad-hoc fetches).
     TARGET_ROLES = [
         "ai engineer",
         "machine learning engineer",
@@ -58,6 +61,9 @@ class BaseSource(ABC):
         "generative ai engineer",
         "ai platform engineer",
     ]
+
+    def __init__(self, role_profile: RoleProfile | None = None) -> None:
+        self.role_profile = role_profile
 
     def load_seeds(self) -> list[str]:
         """Read company identifiers from the source seed file."""
@@ -75,9 +81,17 @@ class BaseSource(ABC):
         return seeds
 
     def is_target_role(self, title: str) -> bool:
-        """Return whether a job title matches the target role list."""
+        """Return whether a job title falls inside the run's target roles."""
+        if self.role_profile is not None:
+            return self.role_profile.matches_title(title)
         lowered = title.lower()
         return any(role in lowered for role in self.TARGET_ROLES)
+
+    def search_queries(self) -> list[str]:
+        """Keyword queries for search-based sources, driven by the user's roles."""
+        if self.role_profile is not None and self.role_profile.search_queries:
+            return list(self.role_profile.search_queries)
+        return self.load_seeds()
 
     def is_recent_enough(self, posted_at: date | None) -> bool:
         """Discard postings older than MAX_AGE_DAYS."""

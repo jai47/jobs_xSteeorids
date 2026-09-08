@@ -54,7 +54,7 @@ class NaukriSource(BaseSource):
         self,
         progress_callback: Callable[[str], None] | None = None,
     ) -> List[JobDict]:
-        seeds = self.load_seeds()
+        seeds = self.search_queries()
         jobs: list[JobDict] = []
         seen_ids: set[str] = set()
         total = len(seeds)

@@ -16,6 +16,7 @@ from pipeline.sources.lever import LeverSource
 from pipeline.sources.naukri import NaukriSource
 from pipeline.sources.remoteok import RemoteOKSource
 from pipeline.sources.remotive import RemotiveSource
+from pipeline.role_targets import RoleProfile
 
 log = logging.getLogger(__name__)
 
@@ -33,11 +34,12 @@ SOURCES: list[type[BaseSource]] = [
 
 async def fetch_all_sources(
     progress_callback: Callable[[str], None] | None = None,
+    role_profile: RoleProfile | None = None,
 ) -> list[JobDict]:
-    """Fetch jobs from every registered source."""
+    """Fetch jobs from every registered source, targeting the user's roles."""
     all_jobs: list[JobDict] = []
     for source_cls in SOURCES:
-        source = source_cls()
+        source = source_cls(role_profile=role_profile)
         if progress_callback:
             progress_callback(f"Fetching {source.source_name} boards...")
         try:
@@ -55,6 +57,9 @@ async def fetch_all_sources(
 
 def fetch_all_sources_sync(
     progress_callback: Callable[[str], None] | None = None,
+    role_profile: RoleProfile | None = None,
 ) -> list[JobDict]:
     """Synchronous wrapper for scripts and tests."""
-    return asyncio.run(fetch_all_sources(progress_callback=progress_callback))
+    return asyncio.run(
+        fetch_all_sources(progress_callback=progress_callback, role_profile=role_profile)
+    )

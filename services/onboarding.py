@@ -65,6 +65,32 @@ def sync_user_skills_from_resume(session: Session, user: User) -> list[str]:
     return skills
 
 
+def sync_user_roles_from_resume(
+    session: Session,
+    user: User,
+    parsed: ParsedResumeOutput | None = None,
+) -> list[str]:
+    """Seed preferred roles from resume titles so discovery targets the right jobs."""
+    from pipeline.role_targets import active_resume_titles
+
+    if user.preferred_roles:
+        return list(user.preferred_roles)
+
+    titles = list(parsed.previous_titles) if parsed else active_resume_titles(session, user.id)
+    roles: list[str] = []
+    for title in titles:
+        cleaned = str(title).strip()
+        if not cleaned:
+            continue
+        if cleaned.lower() not in {role.lower() for role in roles}:
+            roles.append(cleaned)
+
+    if roles:
+        user.preferred_roles = roles[:5]
+        session.flush()
+    return list(user.preferred_roles or [])
+
+
 def user_has_active_resume(session: Session, user_id: uuid.UUID) -> bool:
     """Return whether the user has an active master resume."""
     resume = session.scalar(
@@ -122,6 +148,7 @@ def save_master_resume_text(
     user.years_experience = parsed.experience_years
     if not user.parsed_skills:
         sync_user_skills_from_resume(session, user)
+    sync_user_roles_from_resume(session, user, parsed)
     session.flush()
     from services.llm_context import rebuild_user_llm_context
 
@@ -158,6 +185,7 @@ def upload_master_resume(
     user.years_experience = parsed.experience_years
     if not user.parsed_skills:
         sync_user_skills_from_resume(session, user)
+    sync_user_roles_from_resume(session, user, parsed)
     session.flush()
     from services.llm_context import rebuild_user_llm_context
 
