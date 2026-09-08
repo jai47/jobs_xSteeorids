@@ -89,6 +89,10 @@ class BaseSource(ABC):
 
     def search_queries(self) -> list[str]:
         """Keyword queries for search-based sources, driven by the user's roles."""
+        if self.role_profile is not None and self.source_name == "naukri":
+            seeds = self.role_profile.naukri_seeds()
+            if seeds:
+                return seeds
         if self.role_profile is not None and self.role_profile.search_queries:
             return list(self.role_profile.search_queries)
         return self.load_seeds()

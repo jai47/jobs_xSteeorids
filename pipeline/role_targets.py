@@ -14,7 +14,20 @@ from typing import Iterable, Sequence
 
 log = logging.getLogger(__name__)
 
-MAX_SEARCH_QUERIES = 8
+MAX_SEARCH_QUERIES = 12
+
+# Cities used to personalise Naukri-style keyword|location seeds.
+COUNTRY_LOCATION_HINTS: dict[str, tuple[str, ...]] = {
+    "IN": ("bangalore", "hyderabad", "pune", "mumbai", "delhi"),
+    "US": ("remote", "san francisco", "new york", "seattle", "austin"),
+    "GB": ("london", "manchester", "remote"),
+    "DE": ("berlin", "munich", "remote"),
+    "SG": ("singapore", "remote"),
+    "AE": ("dubai", "remote"),
+    "CA": ("toronto", "vancouver", "remote"),
+    "AU": ("sydney", "melbourne", "remote"),
+    "NL": ("amsterdam", "remote"),
+}
 
 _NON_ALNUM = re.compile(r"[^a-z0-9]+")
 
@@ -395,6 +408,8 @@ class RoleProfile:
     raw_keywords: tuple[str, ...]
     search_queries: tuple[str, ...]
     origin: str
+    location_hints: tuple[str, ...] = ()
+    has_role_preference: bool = False
 
     def matches_title(self, title: str) -> bool:
         """Return whether a job title is inside this user's target role universe."""
@@ -421,6 +436,19 @@ class RoleProfile:
         if self.raw_keywords:
             return ", ".join(self.raw_keywords[:4])
         return "any role"
+
+    def naukri_seeds(self) -> list[str]:
+        """Keyword|location seeds for Naukri from the user's roles and cities."""
+        locations = list(self.location_hints) or [""]
+        seeds: list[str] = []
+        for query in self.search_queries:
+            for location in locations[:3]:
+                seed = f"{query}|{location}" if location else query
+                if seed not in seeds:
+                    seeds.append(seed)
+                if len(seeds) >= MAX_SEARCH_QUERIES:
+                    return seeds
+        return seeds
 
 
 def _expand_related(families: Iterable[str]) -> list[str]:
@@ -464,23 +492,6 @@ _QUERY_NOISE = frozenset(
 def _strip_seniority(role: str) -> str:
     tokens = [token for token in normalise_title(role).split() if token not in _QUERY_NOISE]
     return " ".join(tokens)
-
-
-def _build_search_queries(raw_roles: Sequence[str], families: Sequence[str]) -> tuple[str, ...]:
-    queries: list[str] = []
-
-    def add(candidate: str) -> None:
-        cleaned = normalise_title(candidate)
-        if cleaned and cleaned not in queries:
-            queries.append(cleaned)
-
-    # The user's own wording is the most accurate query we have.
-    for role in raw_roles:
-        add(_strip_seniority(role))
-    for key in families:
-        for query in FAMILIES_BY_KEY[key].search_queries:
-            add(query)
-    return tuple(queries[:MAX_SEARCH_QUERIES])
 
 
 # Words that appear in almost every professional title — never use them alone
@@ -529,10 +540,58 @@ def title_matches_custom_roles(title: str, raw_keywords: Sequence[str]) -> bool:
     return False
 
 
+def _build_search_queries(
+    raw_roles: Sequence[str],
+    families: Sequence[str],
+    *,
+    skills: Sequence[str] | None = None,
+    extra_queries: Sequence[str] | None = None,
+) -> tuple[str, ...]:
+    queries: list[str] = []
+
+    def add(candidate: str) -> None:
+        cleaned = normalise_title(candidate)
+        if cleaned and cleaned not in queries:
+            queries.append(cleaned)
+
+    # The user's own wording is the most accurate query we have.
+    for role in raw_roles:
+        add(_strip_seniority(role))
+    for query in extra_queries or []:
+        add(_strip_seniority(query))
+    for key in families:
+        for query in FAMILIES_BY_KEY[key].search_queries:
+            add(query)
+    # Skill-backed queries help aggregators when titles alone are thin.
+    for skill in list(skills or [])[:6]:
+        cleaned = normalise_title(str(skill))
+        if cleaned and len(cleaned) >= 3 and cleaned not in queries:
+            # Prefer compound skill queries with the primary role when available.
+            if raw_roles:
+                add(f"{_strip_seniority(raw_roles[0])} {cleaned}")
+            else:
+                add(cleaned)
+    return tuple(queries[:MAX_SEARCH_QUERIES])
+
+
+def location_hints_for_countries(countries: Sequence[str] | None) -> tuple[str, ...]:
+    """Map preferred country codes to city/search location hints."""
+    hints: list[str] = []
+    for country in countries or []:
+        code = str(country).strip().upper()
+        for hint in COUNTRY_LOCATION_HINTS.get(code, ()):
+            if hint not in hints:
+                hints.append(hint)
+    return tuple(hints[:6])
+
+
 def build_role_profile(
     preferred_roles: Sequence[str] | None,
     resume_titles: Sequence[str] | None = None,
     skills: Sequence[str] | None = None,
+    *,
+    preferred_countries: Sequence[str] | None = None,
+    extra_queries: Sequence[str] | None = None,
 ) -> RoleProfile:
     """Resolve the role universe from profile preferences, resume titles, then skills.
 
@@ -573,16 +632,26 @@ def build_role_profile(
     raw_keywords = tuple(
         dict.fromkeys(normalise_title(role) for role in raw_roles if normalise_title(role))
     )
+    has_pref = bool(preferred or titles or extra_queries) or origin == "resume_skills"
     return RoleProfile(
         families=tuple(ordered),
         raw_keywords=raw_keywords,
-        search_queries=_build_search_queries(raw_roles, ordered),
+        search_queries=_build_search_queries(
+            raw_roles,
+            ordered,
+            skills=skills,
+            extra_queries=extra_queries,
+        ),
         origin=origin,
+        location_hints=location_hints_for_countries(preferred_countries),
+        has_role_preference=has_pref,
     )
 
 
 def build_role_profile_for_user(session, user) -> RoleProfile:
     """Build the role profile for a user, reading resume titles when preferences are empty."""
+    from services.job_taste import taste_search_queries
+
     resume_titles: list[str] = []
     if not (user.preferred_roles or []):
         resume_titles = active_resume_titles(session, user.id)
@@ -590,6 +659,8 @@ def build_role_profile_for_user(session, user) -> RoleProfile:
         preferred_roles=list(user.preferred_roles or []),
         resume_titles=resume_titles,
         skills=list(user.parsed_skills or []),
+        preferred_countries=list(user.preferred_countries or []),
+        extra_queries=taste_search_queries(user),
     )
 
 

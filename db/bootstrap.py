@@ -54,8 +54,24 @@ def ensure_schema(bind: Engine | None = None) -> list[str]:
     _ensure_multi_tenant_columns(target)
     _ensure_token_billing_schema(target)
     _ensure_user_llm_context_table(target)
+    _ensure_job_stale_tracking_columns(target)
     _maybe_stamp_alembic(target, after)
     return created
+
+
+def _ensure_job_stale_tracking_columns(target: Engine) -> None:
+    """Add discovery freshness columns used by the stale reconciler."""
+    with target.begin() as conn:
+        conn.execute(
+            text("ALTER TABLE jobs ADD COLUMN IF NOT EXISTS last_seen_at TIMESTAMPTZ")
+        )
+        conn.execute(
+            text(
+                "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS consecutive_misses "
+                "INTEGER NOT NULL DEFAULT 0"
+            )
+        )
+    log.info("Ensured jobs.last_seen_at / consecutive_misses columns")
 
 
 def _ensure_user_llm_context_table(target: Engine) -> None:

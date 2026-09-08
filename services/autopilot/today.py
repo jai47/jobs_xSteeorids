@@ -21,14 +21,16 @@ from db.models import (
     ScoredOpportunity,
     User,
 )
-from pipeline.stages.overall_scorer import DIGEST_MIN_SCORE
+from pipeline.stages.overall_scorer import DIGEST_MIN_SCORE, is_digest_eligible
 from services.autopilot.state import get_app_autopilot
+from pipeline.role_targets import build_role_profile_for_user
 
 TOP_OPPS = 8
 
 
 def build_today_queue(session: Session, user: User) -> TodayQueueResponse:
     today = date.today()
+    role_profile = build_role_profile_for_user(session, user)
 
     opp_rows = (
         session.query(ScoredOpportunity, Job)
@@ -39,12 +41,18 @@ def build_today_queue(session: Session, user: User) -> TodayQueueResponse:
             ScoredOpportunity.user_feedback.is_(None),
         )
         .order_by(ScoredOpportunity.overall_score.desc())
-        .limit(TOP_OPPS * 2)
+        .limit(TOP_OPPS * 3)
         .all()
     )
     opportunities: list[TodayOpportunityItem] = []
     for opp, job in opp_rows:
         if job.is_stale:
+            continue
+        if not is_digest_eligible(
+            float(opp.overall_score or 0),
+            score_role_match=opp.score_role_match,
+            has_role_preference=role_profile.has_role_preference,
+        ):
             continue
         opportunities.append(
             TodayOpportunityItem(

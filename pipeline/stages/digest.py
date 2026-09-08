@@ -11,7 +11,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from db.models import DailyDigest, Job, ScoredOpportunity, User
-from pipeline.stages.overall_scorer import DIGEST_MIN_SCORE
+from pipeline.stages.overall_scorer import DIGEST_MIN_SCORE, is_digest_eligible
 
 DIGEST_TEMPLATE = """
 AI CAREER DIGEST — {date}
@@ -85,17 +85,38 @@ def _format_opportunities_table(opportunities: list[dict]) -> str:
     return "\n".join(lines) if lines else "  (none meeting threshold)"
 
 
+def _digest_eligible_opportunities(
+    opportunities: list[dict],
+    *,
+    has_role_preference: bool = False,
+) -> list[dict]:
+    return [
+        opp
+        for opp in opportunities
+        if is_digest_eligible(
+            float(opp.get("overall_score") or 0),
+            score_role_match=opp.get("score_role_match"),
+            has_role_preference=has_role_preference,
+        )
+    ]
+
+
 def build_digest_content(
     *,
     digest_date: date,
     metrics: dict[str, int],
     opportunities: list[dict],
     trending: list[tuple[str, int]],
+    has_role_preference: bool = False,
 ) -> str:
     """Render digest text from pipeline metrics and scored opportunities."""
-    digest_eligible = [opp for opp in opportunities if opp.get("overall_score", 0) >= DIGEST_MIN_SCORE]
+    digest_eligible = _digest_eligible_opportunities(
+        opportunities, has_role_preference=has_role_preference
+    )
     display_opps = digest_eligible
-    top = max(opportunities, key=lambda item: item.get("overall_score", 0), default=None)
+    top = max(digest_eligible, key=lambda item: item.get("overall_score", 0), default=None)
+    if top is None:
+        top = max(opportunities, key=lambda item: item.get("overall_score", 0), default=None)
 
     if top is None:
         top_fields = {
@@ -175,12 +196,15 @@ def build_digest_metrics(
     metrics: dict[str, int],
     opportunities: list[dict],
     trending: list[tuple[str, int]],
+    has_role_preference: bool = False,
 ) -> dict[str, Any]:
     """Structured brief payload for the Digest UI (alongside content_text)."""
-    digest_eligible = [
-        opp for opp in opportunities if opp.get("overall_score", 0) >= DIGEST_MIN_SCORE
-    ]
-    top = max(opportunities, key=lambda item: item.get("overall_score", 0), default=None)
+    digest_eligible = _digest_eligible_opportunities(
+        opportunities, has_role_preference=has_role_preference
+    )
+    top = max(digest_eligible, key=lambda item: item.get("overall_score", 0), default=None)
+    if top is None:
+        top = max(opportunities, key=lambda item: item.get("overall_score", 0), default=None)
 
     country_counts: dict[str, int] = {}
     for opp in digest_eligible:
@@ -236,12 +260,17 @@ def generate_digest_for_user(
     opportunities: list[dict],
 ) -> DailyDigest:
     """Build and store a daily digest for one user."""
+    from pipeline.role_targets import build_role_profile_for_user
+
     trending = get_trending_companies(session)
+    role_profile = build_role_profile_for_user(session, user)
+    has_role_preference = role_profile.has_role_preference
     content = build_digest_content(
         digest_date=digest_date,
         metrics=metrics,
         opportunities=opportunities,
         trending=trending,
+        has_role_preference=has_role_preference,
     )
     return save_daily_digest(
         session,
@@ -252,6 +281,7 @@ def generate_digest_for_user(
             metrics=metrics,
             opportunities=opportunities,
             trending=trending,
+            has_role_preference=has_role_preference,
         ),
     )
 

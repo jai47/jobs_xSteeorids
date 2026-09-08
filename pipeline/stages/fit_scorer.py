@@ -13,6 +13,7 @@ from pipeline.role_targets import (
     primary_family_for,
     title_matches_custom_roles,
 )
+from services.job_taste import compute_taste_boost
 from skills.synonyms import normalise_skill
 
 
@@ -118,6 +119,9 @@ def score_fit(job: dict, user) -> FitScoreResult:
         + country_pref * 0.10
         + remote_pref * 0.05
     )
+    taste_boost = compute_taste_boost(job, user)
+    if taste_boost:
+        fit_score = max(0.0, min(100.0, fit_score + taste_boost))
 
     matched_list = list(required & user_skills)[:5]
     reasoning = (
@@ -126,6 +130,8 @@ def score_fit(job: dict, user) -> FitScoreResult:
         f"Role: {role_reason}. "
         f"Experience: {user_exp}yrs vs {job_exp} required."
     )
+    if taste_boost:
+        reasoning += f" Taste: {taste_boost:+.0f} from past feedback."
 
     return {
         "score_skill_match": round(skill_match, 1),

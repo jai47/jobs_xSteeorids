@@ -10,6 +10,7 @@ from sqlalchemy import func
 
 from api.deps import APIError
 from db.models import Application, Job, ScoredOpportunity, User
+from services.job_taste import record_opportunity_feedback
 from services.resume_tailoring import create_tailored_resume_version, get_active_master_resume
 
 VALID_REJECT_REASONS = {"company", "role", "location", "other"}
@@ -130,6 +131,7 @@ def approve_opportunity(
 
     opp.user_feedback = "approved"
     opp.reject_reason = None
+    record_opportunity_feedback(user, job, feedback="approved")
 
     application = (
         session.query(Application)
@@ -165,6 +167,9 @@ def reject_opportunity(
     opp, job = _get_opportunity_for_user(session, user, opportunity_id)
     opp.user_feedback = "rejected"
     opp.reject_reason = reason
+    record_opportunity_feedback(
+        user, job, feedback="rejected", reject_reason=reason
+    )
 
     companies = list(user.blacklisted_companies or [])
     roles = list(user.blacklisted_roles or [])
@@ -192,8 +197,9 @@ def skip_opportunity(
     opportunity_id: uuid.UUID,
 ) -> ScoredOpportunity:
     """Mark an opportunity as skipped."""
-    opp, _job = _get_opportunity_for_user(session, user, opportunity_id)
+    opp, job = _get_opportunity_for_user(session, user, opportunity_id)
     opp.user_feedback = "skipped"
     opp.reject_reason = None
+    record_opportunity_feedback(user, job, feedback="skipped")
     session.flush()
     return opp

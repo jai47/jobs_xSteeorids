@@ -101,6 +101,9 @@ class Job(Base):
     is_active = Column(Boolean, default=True)
     is_stale = Column(Boolean, default=False)
     last_verified = Column(Date)
+    # Discovery freshness for full-board ATS sources (greenhouse/lever/…).
+    last_seen_at = Column(DateTime(timezone=True), nullable=True)
+    consecutive_misses = Column(Integer, default=0, nullable=False)
     archetype = Column(String, nullable=True)
     salary_min = Column(Integer, nullable=True)
     salary_max = Column(Integer, nullable=True)

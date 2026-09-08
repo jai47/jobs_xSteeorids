@@ -33,8 +33,9 @@ from pipeline.stages.job_enrichment import enrich_job_row
 from pipeline.stages.liveness import schedule_liveness_verification
 from pipeline.stages.legitimacy_rules import evaluate_legitimacy
 from pipeline.stages.overall_scorer import score_overall
-from pipeline.stages.overall_scorer import DIGEST_MIN_SCORE
+from pipeline.stages.overall_scorer import DIGEST_MIN_SCORE, is_digest_eligible
 from pipeline.stages.skill_gap import maybe_generate_skill_gap_reports
+from pipeline.stages.stale_reconciler import reconcile_stale_jobs
 from pipeline.stages.visa_scorer import score_visa
 from services.onboarding import (
     sync_user_roles_from_resume,
@@ -52,6 +53,7 @@ PIPELINE_STAGE_ORDER = [
     "discover",
     "deduplicate",
     "store_jobs",
+    "reconcile_stale",
     "score",
     "liveness",
     "company_universe",
@@ -347,7 +349,34 @@ class NightlyPipeline:
                     stage="store_jobs",
                     message=f"Stored {len(jobs)} jobs in database",
                 )
-            elif self._should_run("score") or self._should_run("digest"):
+
+            if self._should_run("reconcile_stale"):
+                if jobs:
+                    stats = self._run_stage(
+                        "reconcile_stale",
+                        lambda: reconcile_stale_jobs(self.session, jobs),
+                    ) or {"deactivated": 0, "missed": 0, "reactivated": 0}
+                    append_progress(
+                        self.session,
+                        self.run,
+                        stage="reconcile_stale",
+                        message=(
+                            f"Stale check: {stats.get('missed', 0)} missed, "
+                            f"{stats.get('deactivated', 0)} deactivated, "
+                            f"{stats.get('reactivated', 0)} reactivated"
+                        ),
+                    )
+                else:
+                    append_progress(
+                        self.session,
+                        self.run,
+                        stage="reconcile_stale",
+                        message="Skipped stale reconcile — no discovery batch in memory",
+                    )
+
+            if not jobs and (
+                self._should_run("score") or self._should_run("digest")
+            ):
                 jobs = self._load_jobs_from_db()
                 append_progress(
                     self.session,
@@ -376,7 +405,11 @@ class NightlyPipeline:
                         universe_jobs.extend(
                             opp
                             for opp in user_opps
-                            if opp.get("overall_score", 0) >= DIGEST_MIN_SCORE
+                            if is_digest_eligible(
+                                float(opp.get("overall_score") or 0),
+                                score_role_match=opp.get("score_role_match"),
+                                has_role_preference=self._role_profile_for(user).has_role_preference,
+                            )
                         )
                     append_progress(
                         self.session,
@@ -384,7 +417,7 @@ class NightlyPipeline:
                         stage="score",
                         message=(
                             f"Scored {scored_count} jobs for {user.email} "
-                            f"({top_count} with score ≥ {int(DIGEST_MIN_SCORE)})"
+                            f"({top_count} digest-eligible)"
                         ),
                     )
 
@@ -542,6 +575,7 @@ class NightlyPipeline:
     def _store_jobs(self, jobs: list[JobDict]) -> None:
         refresh_fx_rates(self.session)
         total = len(jobs)
+        now = datetime.now(timezone.utc)
         for index, job_dict in enumerate(jobs, start=1):
             self._abort_if_cancelled()
             existing = (
@@ -561,6 +595,10 @@ class NightlyPipeline:
                 existing.description = job_dict.get("description")
                 existing.visa_keywords = job_dict.get("visa_keywords", [])
                 existing.visa_mentioned = bool(job_dict.get("visa_keywords"))
+                existing.is_active = True
+                existing.is_stale = False
+                existing.consecutive_misses = 0
+                existing.last_seen_at = now
                 enrich_job_row(self.session, existing, job_dict)
             else:
                 row = Job(
@@ -579,6 +617,10 @@ class NightlyPipeline:
                     experience_min=job_dict.get("experience_min"),
                     description=job_dict.get("description"),
                     posted_at=job_dict.get("posted_at"),
+                    is_active=True,
+                    is_stale=False,
+                    consecutive_misses=0,
+                    last_seen_at=now,
                 )
                 self.session.add(row)
                 self.session.flush()
@@ -687,7 +729,11 @@ class NightlyPipeline:
                 opps_by_job_id[job_row.id] = opp
 
             scored_opportunities.append(scored)
-            if scored.get("overall_score", 0) >= DIGEST_MIN_SCORE:
+            if is_digest_eligible(
+                float(scored.get("overall_score") or 0),
+                score_role_match=scored.get("score_role_match"),
+                has_role_preference=role_profile.has_role_preference,
+            ):
                 top_count += 1
 
             if self.run is not None and total > 0 and index % _PROGRESS_EVERY_N_JOBS == 0:
@@ -803,6 +849,7 @@ class NightlyPipeline:
                     "remote_type": job.remote_type,
                     "salary_display": job.salary_display,
                     "overall_score": row.overall_score,
+                    "score_role_match": row.score_role_match,
                     "classification": row.classification,
                     "visa_status": row.visa_status,
                     "score_visa": row.score_visa,
@@ -825,7 +872,18 @@ class NightlyPipeline:
         )
         from services.notifications.producers import count_overdue_follow_ups, enqueue_digest_notifications
 
-        digest_eligible = len([o for o in opportunities if o.get("overall_score", 0) >= DIGEST_MIN_SCORE])
+        role_profile = self._role_profile_for(user)
+        digest_eligible = len(
+            [
+                o
+                for o in opportunities
+                if is_digest_eligible(
+                    float(o.get("overall_score") or 0),
+                    score_role_match=o.get("score_role_match"),
+                    has_role_preference=role_profile.has_role_preference,
+                )
+            ]
+        )
         overdue = count_overdue_follow_ups(self.session, user)
         enqueue_digest_notifications(
             self.session,

@@ -10,7 +10,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from db.models import Job, MasterResume, ScoredOpportunity, SkillGapReport, User, UserLlmContext
-from pipeline.stages.overall_scorer import DIGEST_MIN_SCORE
+from pipeline.stages.overall_scorer import DIGEST_MIN_SCORE, is_digest_eligible
+from pipeline.role_targets import build_role_profile_for_user
 
 log = logging.getLogger(__name__)
 
@@ -71,6 +72,7 @@ def _summarize_resume(user: User, master: MasterResume | None) -> str:
 
 
 def _jobs_snapshot(session: Session, user: User, *, limit: int = JOBS_LIMIT) -> list[dict[str, Any]]:
+    role_profile = build_role_profile_for_user(session, user)
     rows = (
         session.query(ScoredOpportunity, Job)
         .join(Job, Job.id == ScoredOpportunity.job_id)
@@ -80,11 +82,17 @@ def _jobs_snapshot(session: Session, user: User, *, limit: int = JOBS_LIMIT) -> 
             ScoredOpportunity.user_feedback.is_(None),
         )
         .order_by(ScoredOpportunity.overall_score.desc())
-        .limit(limit)
+        .limit(limit * 2)
         .all()
     )
     out: list[dict[str, Any]] = []
     for opp, job in rows:
+        if not is_digest_eligible(
+            float(opp.overall_score or 0),
+            score_role_match=opp.score_role_match,
+            has_role_preference=role_profile.has_role_preference,
+        ):
+            continue
         desc = " ".join((job.description or "").split())
         out.append(
             {
@@ -104,6 +112,8 @@ def _jobs_snapshot(session: Session, user: User, *, limit: int = JOBS_LIMIT) -> 
                 "fit_reasoning": (opp.fit_reasoning or "")[:220] or None,
             }
         )
+        if len(out) >= limit:
+            break
     return out
 
 

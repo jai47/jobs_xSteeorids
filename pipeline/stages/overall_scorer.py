@@ -16,6 +16,9 @@ class OverallScoreResult(TypedDict):
 
 
 DIGEST_MIN_SCORE = 50.0
+# When the user has role preferences, off-family titles cannot enter the digest
+# even if visa/geo inflate the overall score.
+DIGEST_MIN_ROLE_MATCH = 100.0
 
 
 def score_overall(fit_result: dict, visa_result: dict) -> OverallScoreResult:
@@ -42,6 +45,15 @@ def score_overall(fit_result: dict, visa_result: dict) -> OverallScoreResult:
     }
 
 
-def is_digest_eligible(overall_score: float) -> bool:
+def is_digest_eligible(
+    overall_score: float,
+    *,
+    score_role_match: float | None = None,
+    has_role_preference: bool = False,
+) -> bool:
     """Return True when an opportunity should appear in the daily digest."""
-    return overall_score >= DIGEST_MIN_SCORE
+    if overall_score < DIGEST_MIN_SCORE:
+        return False
+    if has_role_preference and score_role_match is not None:
+        return float(score_role_match) >= DIGEST_MIN_ROLE_MATCH
+    return True

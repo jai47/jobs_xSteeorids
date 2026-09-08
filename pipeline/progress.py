@@ -16,6 +16,7 @@ STAGE_LABELS = {
     "discover": "Discovering jobs",
     "deduplicate": "Deduplicating",
     "store_jobs": "Storing jobs",
+    "reconcile_stale": "Reconciling stale jobs",
     "score": "Scoring",
     "liveness": "Liveness checks",
     "company_universe": "Company universe",

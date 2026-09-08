@@ -16,6 +16,8 @@ from pipeline.sources.lever import LeverSource
 from pipeline.sources.naukri import NaukriSource
 from pipeline.sources.remoteok import RemoteOKSource
 from pipeline.sources.remotive import RemotiveSource
+from pipeline.sources.smartrecruiters import SmartRecruitersSource
+from pipeline.sources.workable import WorkableSource
 from pipeline.role_targets import RoleProfile
 
 log = logging.getLogger(__name__)
@@ -24,6 +26,8 @@ SOURCES: list[type[BaseSource]] = [
     GreenhouseSource,
     LeverSource,
     AshbySource,
+    WorkableSource,
+    SmartRecruitersSource,
     RemotiveSource,
     RemoteOKSource,
     ArbeitnowSource,
