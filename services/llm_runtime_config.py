@@ -12,6 +12,7 @@ _RUNTIME_PATH = Path(__file__).resolve().parent.parent / "data" / "llm_runtime.j
 VALID_PROVIDERS = frozenset(
     {
         "auto",
+        "platform",
         "groq",
         "anthropic",
         "deepseek",

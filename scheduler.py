@@ -20,12 +20,12 @@ scheduler = AsyncIOScheduler()
 
 
 def _execute_pipeline() -> None:
-    """Run the nightly pipeline inside a DB session."""
-    log.info("Starting scheduled nightly pipeline")
+    """Run the nightly pipeline for each user individually."""
+    log.info("Starting scheduled nightly pipeline (per user)")
     try:
         with get_session() as session:
-            run = run_nightly_pipeline(session)
-        log.info("Pipeline finished with status=%s", run.status)
+            run = run_nightly_pipeline(session, user=None)
+        log.info("Nightly pipeline batch finished with last status=%s", run.status)
     except Exception:
         log.exception("Scheduled pipeline run failed")
 

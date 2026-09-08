@@ -19,20 +19,28 @@ def generate_chat_reply(
     recent_messages: list[dict[str, Any]] | None = None,
     user_id: uuid.UUID,
     session: Session,
+    career_context: str = "",
 ) -> dict[str, Any]:
     history = json.dumps(recent_messages or [], default=str)[:2500]
+    career = (career_context or "").strip()[:7000]
+    career_block = (
+        f"\nCandidate resume + matched jobs context (use this; do not invent experience):\n{career}\n"
+        if career
+        else ""
+    )
     prompt = f"""You are the job-search Autopilot coach for {candidate_name}.
 Speak warmly and clearly (under 140 words). Never claim you sent LinkedIn messages or applied.
+Ground advice in the candidate's real resume skills/titles and the matched jobs below when relevant.
 The UI already shows visual cards (stats, jobs, checklist) — your reply should complement them,
 not repeat every number. Suggest concrete next actions.
-
+{career_block}
 Recent conversation:
 {history}
 
 User message: {message[:2000]}
 
-Context JSON:
-{json.dumps(context, default=str)[:5000]}
+Today-queue Context JSON:
+{json.dumps(context, default=str)[:4000]}
 
 Return ONLY JSON:
 {{

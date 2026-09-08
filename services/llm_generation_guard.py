@@ -60,7 +60,15 @@ def count_daily_generations(session: Session, user_id: uuid.UUID) -> int:
 
 
 def enforce_daily_generation_guard(session: Session, user_id: uuid.UUID) -> None:
-    """Raise 429 if the user exceeded the daily generation cap."""
+    """Raise 429 if daily gen cap hit; raise 402 if token balance cannot cover an LLM call."""
+    from db.models import User
+    from services.token_billing import enforce_balance, get_rates
+
+    user = session.get(User, user_id)
+    if user is not None:
+        rates = get_rates(session)
+        enforce_balance(session, user, int(rates["llm_call_tokens"]))
+
     used = count_daily_generations(session, user_id)
     if used >= DAILY_GENERATION_LIMIT:
         raise APIError(

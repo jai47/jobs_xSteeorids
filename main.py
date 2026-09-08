@@ -8,12 +8,14 @@ from api.routes import api_router
 from config import settings
 from db.bootstrap import ensure_schema
 from scheduler import shutdown_scheduler, start_scheduler
+from services.seed_admin import seed_admin_user_if_configured
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Empty Supabase / mis-migrated DBs: create missing tables before cron jobs run.
     ensure_schema()
+    seed_admin_user_if_configured()
     start_scheduler()
     yield
     shutdown_scheduler()

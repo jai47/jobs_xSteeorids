@@ -123,6 +123,9 @@ def save_master_resume_text(
     if not user.parsed_skills:
         sync_user_skills_from_resume(session, user)
     session.flush()
+    from services.llm_context import rebuild_user_llm_context
+
+    rebuild_user_llm_context(session, user)
     return master_resume, parsed
 
 
@@ -156,4 +159,7 @@ def upload_master_resume(
     if not user.parsed_skills:
         sync_user_skills_from_resume(session, user)
     session.flush()
+    from services.llm_context import rebuild_user_llm_context
+
+    rebuild_user_llm_context(session, user)
     return master_resume, parsed

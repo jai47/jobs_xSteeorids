@@ -22,6 +22,8 @@ def _login_response(user: User) -> LoginResponse:
         user_id=str(user.id),
         name=user.name,
         email=user.email,
+        is_admin=bool(getattr(user, "is_admin", False)),
+        token_balance=int(getattr(user, "token_balance", 1000) or 0),
     )
 
 

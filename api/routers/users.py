@@ -8,6 +8,12 @@ from fastapi import APIRouter, Depends, File, UploadFile
 from sqlalchemy.orm import Session
 
 from api.deps import APIError, get_current_user, get_db
+from api.schemas.billing import (
+    UserLlmKeyUpsert,
+    UserLlmKeysResponse,
+    UserLlmProviderStatus,
+    UserPreferredProviderUpdate,
+)
 from api.schemas.user import (
     BlacklistResponse,
     BlacklistUpdate,
@@ -23,6 +29,7 @@ from services.llm_runtime_config import VALID_PROVIDERS, set_selected_provider
 from db.models import User
 from services.cover_letters import get_user_angles
 from services.onboarding import save_master_resume_text, upload_master_resume, user_has_active_resume
+from services.user_llm_keys import delete_user_key, list_user_keys, upsert_user_key
 
 router = APIRouter(tags=["users"])
 
@@ -46,6 +53,9 @@ def _profile_response(user: User, has_active_resume: bool) -> UserProfileRespons
         cover_letter_angles=get_user_angles(user),
         notify_digest_email=bool(user.notify_digest_email),
         notify_followup_email=bool(user.notify_followup_email),
+        is_admin=bool(getattr(user, "is_admin", False)),
+        token_balance=int(getattr(user, "token_balance", 1000) or 0),
+        preferred_llm_provider=getattr(user, "preferred_llm_provider", None) or "auto",
     )
 
 
@@ -127,16 +137,17 @@ def upload_resume_text(
 
 @router.get("/config/llm-status", response_model=LLMStatusResponse)
 def llm_status() -> LLMStatusResponse:
-    """Report LLM provider configuration (key values are never returned)."""
+    """Deprecated for end users — platform .env status. Prefer /admin/llm-platform-status."""
     return LLMStatusResponse(**build_status_payload())
 
 
 @router.patch("/config/llm-provider", response_model=LLMStatusResponse)
 def update_llm_provider(
     payload: LLMProviderUpdate,
-    _user: Annotated[User, Depends(get_current_user)],
+    user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
 ) -> LLMStatusResponse:
-    """Set the preferred LLM provider for this deployment (keys remain in .env)."""
+    """Set the preferred LLM provider for this user (BYOK / platform fallback)."""
     provider = payload.provider.strip().lower()
     if provider not in VALID_PROVIDERS:
         raise APIError(
@@ -144,8 +155,72 @@ def update_llm_provider(
             f"Unknown provider '{payload.provider}'. "
             f"Choose one of: {', '.join(sorted(VALID_PROVIDERS))}.",
         )
-    set_selected_provider(provider)
-    return LLMStatusResponse(**build_status_payload())
+    user.preferred_llm_provider = provider
+    # Admins can still set the deployment-wide default for unauthenticated tooling.
+    if bool(getattr(user, "is_admin", False)):
+        set_selected_provider(provider)
+    db.flush()
+    payload_out = build_status_payload()
+    payload_out["selected_provider"] = provider
+    for key in list(payload_out.keys()):
+        if key.endswith("_configured"):
+            payload_out[key] = False
+    return LLMStatusResponse(**payload_out)
+
+
+@router.get("/users/me/llm-keys", response_model=UserLlmKeysResponse)
+def get_my_llm_keys(
+    user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> UserLlmKeysResponse:
+    providers = [UserLlmProviderStatus(**row) for row in list_user_keys(db, user)]
+    return UserLlmKeysResponse(
+        preferred_provider=getattr(user, "preferred_llm_provider", None) or "auto",
+        providers=providers,
+    )
+
+
+@router.put("/users/me/llm-keys", response_model=UserLlmKeysResponse)
+def put_my_llm_key(
+    payload: UserLlmKeyUpsert,
+    user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> UserLlmKeysResponse:
+    upsert_user_key(db, user, payload.provider, payload.api_key, model=payload.model)
+    providers = [UserLlmProviderStatus(**row) for row in list_user_keys(db, user)]
+    return UserLlmKeysResponse(
+        preferred_provider=getattr(user, "preferred_llm_provider", None) or "auto",
+        providers=providers,
+    )
+
+
+@router.delete("/users/me/llm-keys/{provider}", response_model=UserLlmKeysResponse)
+def delete_my_llm_key(
+    provider: str,
+    user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> UserLlmKeysResponse:
+    delete_user_key(db, user, provider)
+    providers = [UserLlmProviderStatus(**row) for row in list_user_keys(db, user)]
+    return UserLlmKeysResponse(
+        preferred_provider=getattr(user, "preferred_llm_provider", None) or "auto",
+        providers=providers,
+    )
+
+
+@router.patch("/users/me/llm-preference", response_model=UserLlmKeysResponse)
+def patch_llm_preference(
+    payload: UserPreferredProviderUpdate,
+    user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> UserLlmKeysResponse:
+    provider = payload.provider.strip().lower()
+    if provider not in VALID_PROVIDERS:
+        raise APIError(400, f"Unknown provider '{payload.provider}'", "INVALID_PROVIDER")
+    user.preferred_llm_provider = provider
+    db.flush()
+    providers = [UserLlmProviderStatus(**row) for row in list_user_keys(db, user)]
+    return UserLlmKeysResponse(preferred_provider=provider, providers=providers)
 
 
 @router.get("/users/me/blacklists", response_model=BlacklistResponse)

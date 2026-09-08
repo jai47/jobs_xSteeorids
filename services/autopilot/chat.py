@@ -243,6 +243,10 @@ def run_chat(session: Session, user: User, payload: ChatRequest) -> ChatResponse
     enforce_daily_generation_guard(session, user.id)
     queue = build_today_queue(session, user)
     visuals = _build_visuals(queue, message=payload.message)
+    from services.llm_context import ensure_user_llm_context
+
+    career_row = ensure_user_llm_context(session, user)
+    career_context = (career_row.context_text or "")[:7000]
     context = {
         "opportunities": [o.model_dump() for o in queue.opportunities[:5]],
         "follow_ups": [f.model_dump(mode="json") for f in queue.follow_ups[:5]],
@@ -250,6 +254,8 @@ def run_chat(session: Session, user: User, payload: ChatRequest) -> ChatResponse
         "interview_nudges": [i.model_dump() for i in queue.interview_nudges[:5]],
         "preferred_roles": list(user.preferred_roles or []),
         "skills": list(user.parsed_skills or [])[:15],
+        "has_resume_context": bool(career_row.resume_summary),
+        "matched_jobs_count": len(career_row.jobs_snapshot or []),
     }
     memory = list(get_user_autopilot(user).get("chat_memory") or [])
     recent = [
@@ -268,6 +274,7 @@ def run_chat(session: Session, user: User, payload: ChatRequest) -> ChatResponse
             recent_messages=recent,
             user_id=user.id,
             session=session,
+            career_context=career_context,
         )
         reply = str(raw.get("reply") or "").strip() or (
             "Focus on your Today Queue: clear follow-ups, then finish Apply Packets."

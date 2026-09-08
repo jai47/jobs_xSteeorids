@@ -25,6 +25,8 @@ class LoginResponse(BaseModel):
     user_id: str
     name: str
     email: str
+    is_admin: bool = False
+    token_balance: int = 1000
 
 
 class UserProfileResponse(BaseModel):
@@ -45,6 +47,9 @@ class UserProfileResponse(BaseModel):
     cover_letter_angles: dict[str, str] = Field(default_factory=dict)
     notify_digest_email: bool = True
     notify_followup_email: bool = True
+    is_admin: bool = False
+    token_balance: int = 1000
+    preferred_llm_provider: str | None = None
 
 
 class UserProfileUpdate(BaseModel):

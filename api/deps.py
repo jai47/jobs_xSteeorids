@@ -150,6 +150,13 @@ def get_current_user(
     return user
 
 
+def require_admin(user: Annotated[User, Depends(get_current_user)]) -> User:
+    """Require the authenticated user to have is_admin=True."""
+    if not bool(getattr(user, "is_admin", False)):
+        raise APIError(status.HTTP_403_FORBIDDEN, "Admin access required", "FORBIDDEN")
+    return user
+
+
 def _error_body(error: str, code: str, detail: str | None = None) -> dict[str, str | None]:
     return {"error": error, "code": code, "detail": detail}
 

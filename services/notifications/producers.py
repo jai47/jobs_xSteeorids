@@ -10,7 +10,7 @@ from typing import Any
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
-from db.models import Application, DailyDigest, Notification, User
+from db.models import Application, DailyDigest, Notification, PipelineRun, User
 from pipeline.stages.overall_scorer import DIGEST_MIN_SCORE
 from services.application_tracker import _follow_up_flags
 
@@ -209,3 +209,70 @@ def cancel_follow_up_for_application(session: Session, application_id: uuid.UUID
         row.sent_at = now
     session.flush()
     return len(rows)
+
+
+def enqueue_pipeline_status_notification(
+    session: Session,
+    user: User,
+    run: PipelineRun,
+) -> bool:
+    """In-app alert for failed/partial pipeline runs (replaces HealthBanner)."""
+    if run.status == "failed":
+        err = (run.error_message or "").strip()
+        title = "Pipeline run failed"
+        body = f"Last pipeline run failed{f': {err}' if err else ''}"
+    elif run.status == "partial":
+        title = "Pipeline completed with errors"
+        body = "Last pipeline run completed with partial errors — check Pipeline."
+    else:
+        return False
+
+    return _enqueue(
+        session,
+        user_id=user.id,
+        type_="pipeline_status",
+        channel="in_app",
+        payload={
+            "title": title,
+            "body": body,
+            "link_path": "/status",
+            "pipeline_run_id": str(run.id),
+            "status": run.status,
+        },
+        dedupe_key=f"pipeline:{run.id}:{run.status}",
+    )
+
+
+def ensure_pipeline_health_notifications(session: Session, user: User) -> None:
+    """Backfill bell items for the latest run (and a once-per-day idle reminder)."""
+    run = (
+        session.query(PipelineRun)
+        .filter(PipelineRun.user_id == user.id)
+        .order_by(PipelineRun.run_date.desc())
+        .first()
+    )
+    if run is None:
+        return
+
+    if run.status in ("failed", "partial"):
+        enqueue_pipeline_status_notification(session, user, run)
+        return
+
+    today = date.today()
+    if run.status == "running" or run.run_date == today:
+        return
+
+    _enqueue(
+        session,
+        user_id=user.id,
+        type_="pipeline_status",
+        channel="in_app",
+        payload={
+            "title": "Pipeline not run today",
+            "body": "Pipeline has not run today. Refresh opportunities from Pipeline.",
+            "link_path": "/status",
+            "pipeline_run_id": str(run.id),
+            "status": "idle",
+        },
+        dedupe_key=f"pipeline:idle:{user.id}:{today.isoformat()}",
+    )

@@ -10,10 +10,16 @@ from sqlalchemy.orm import Session
 from api.deps import APIError, get_current_user, get_db
 from api.schemas.pipeline import LLMUsageResponse, PipelineRunListResponse, PipelineRunResponse
 from db.models import LLMUsage, PipelineRun, User
-from pipeline.pipeline import PipelineAlreadyRunningError, start_pipeline_run
+from pipeline.pipeline import (
+    PipelineAlreadyRunningError,
+    PipelineContinueError,
+    continue_pipeline_run,
+    start_pipeline_run,
+)
 from pipeline.progress import STAGE_LABELS
 from pipeline.cancel import request_pipeline_cancel
 from pipeline.runner import is_background_pipeline_running, schedule_pipeline_run
+from services.token_billing import get_rates, refund_pipeline_run
 
 router = APIRouter(prefix="/pipeline", tags=["pipeline"])
 
@@ -22,6 +28,7 @@ def _run_response(run: PipelineRun) -> PipelineRunResponse:
     logs = run.progress_log or []
     return PipelineRunResponse(
         id=str(run.id),
+        user_id=str(run.user_id) if run.user_id else None,
         run_date=run.run_date,
         started_at=run.started_at,
         completed_at=run.completed_at,
@@ -39,48 +46,87 @@ def _run_response(run: PipelineRun) -> PipelineRunResponse:
 
 @router.get("/runs", response_model=PipelineRunListResponse)
 def list_pipeline_runs(
-    _user: Annotated[User, Depends(get_current_user)],
+    user: Annotated[User, Depends(get_current_user)],
     db: Annotated[Session, Depends(get_db)],
 ) -> PipelineRunListResponse:
-    """Return pipeline run history, newest first."""
-    runs = db.query(PipelineRun).order_by(PipelineRun.run_date.desc()).limit(30).all()
+    """Return this user's pipeline run history, newest first."""
+    runs = (
+        db.query(PipelineRun)
+        .filter(PipelineRun.user_id == user.id)
+        .order_by(PipelineRun.run_date.desc())
+        .limit(30)
+        .all()
+    )
     return PipelineRunListResponse(runs=[_run_response(run) for run in runs])
 
 
 @router.post("/run", response_model=PipelineRunResponse)
 def trigger_pipeline_run(
-    _user: Annotated[User, Depends(get_current_user)],
+    user: Annotated[User, Depends(get_current_user)],
     db: Annotated[Session, Depends(get_db)],
 ) -> PipelineRunResponse:
-    """Manually trigger the nightly pipeline (runs in background)."""
+    """Manually trigger the pipeline for the authenticated user only.
+
+    Tokens are charged only when the run finishes as success/partial — not on failure.
+    """
+    from services.token_billing import enforce_balance
+
+    rates = get_rates(db)
+    enforce_balance(db, user, int(rates["pipeline_run_tokens"]))
     try:
-        run = start_pipeline_run(db)
-        schedule_pipeline_run()
+        run = start_pipeline_run(db, user)
+        schedule_pipeline_run(user.id)
     except PipelineAlreadyRunningError:
-        raise APIError(409, "Pipeline is already running", "PIPELINE_RUNNING") from None
+        raise APIError(409, "Pipeline is already running for your account", "PIPELINE_RUNNING") from None
+    return _run_response(run)
+
+
+@router.post("/continue", response_model=PipelineRunResponse)
+def continue_pipeline(
+    user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> PipelineRunResponse:
+    """Resume today's failed/cancelled pipeline from the stage where it stopped."""
+    try:
+        run, resume_from = continue_pipeline_run(db, user)
+        schedule_pipeline_run(user.id, resume_from=resume_from)
+    except PipelineAlreadyRunningError:
+        raise APIError(409, "Pipeline is already running for your account", "PIPELINE_RUNNING") from None
+    except PipelineContinueError as exc:
+        raise APIError(409, str(exc), "PIPELINE_CANNOT_CONTINUE") from None
     return _run_response(run)
 
 
 @router.post("/cancel", response_model=PipelineRunResponse)
 def cancel_pipeline_run(
-    _user: Annotated[User, Depends(get_current_user)],
+    user: Annotated[User, Depends(get_current_user)],
     db: Annotated[Session, Depends(get_db)],
 ) -> PipelineRunResponse:
-    """Request cooperative cancellation of today's running pipeline."""
+    """Request cooperative cancellation of today's running pipeline for this user."""
     from datetime import date, datetime, timezone
 
-    run = db.query(PipelineRun).filter_by(run_date=date.today()).first()
+    run = (
+        db.query(PipelineRun)
+        .filter_by(run_date=date.today(), user_id=user.id)
+        .first()
+    )
     if run is None or run.status != "running":
         raise APIError(409, "No pipeline is currently running", "PIPELINE_NOT_RUNNING")
-    if not is_background_pipeline_running():
+    if not is_background_pipeline_running(user.id):
         run.status = "failed"
         run.completed_at = datetime.now(timezone.utc)
+        if not run.error_stage:
+            run.error_stage = run.current_stage
         if not run.error_message:
             run.error_message = "Run interrupted before completion"
+        refund_pipeline_run(db, user, run.id, note="Stale run marked failed — tokens refunded")
+        from services.notifications.producers import enqueue_pipeline_status_notification
+
+        enqueue_pipeline_status_notification(db, user, run)
         db.commit()
         db.refresh(run)
         return _run_response(run)
-    request_pipeline_cancel()
+    request_pipeline_cancel(user.id)
     db.refresh(run)
     return _run_response(run)
 
@@ -91,34 +137,26 @@ def list_pipeline_stages() -> dict[str, str]:
     return STAGE_LABELS
 
 
-def _estimate_cost_usd(provider: str, prompt_tokens: int, completion_tokens: int) -> float:
-    """Rough per-call cost estimate for dashboard display."""
-    rates = {
-        "groq": (0.59 / 1_000_000, 0.79 / 1_000_000),
-        "anthropic": (3.0 / 1_000_000, 15.0 / 1_000_000),
-        "openai": (2.5 / 1_000_000, 10.0 / 1_000_000),
-        "opencode": (2.5 / 1_000_000, 10.0 / 1_000_000),
-    }
-    input_rate, output_rate = rates.get(provider, (3.0 / 1_000_000, 15.0 / 1_000_000))
-    return prompt_tokens * input_rate + completion_tokens * output_rate
-
-
 @router.get("/llm-usage", response_model=LLMUsageResponse)
 def get_llm_usage(
-    _user: Annotated[User, Depends(get_current_user)],
+    user: Annotated[User, Depends(get_current_user)],
     db: Annotated[Session, Depends(get_db)],
 ) -> LLMUsageResponse:
-    """Return aggregate LLM usage and estimated cost."""
-    rows = db.query(LLMUsage).all()
+    """Legacy endpoint — prefer GET /billing/usage for token balance and charts."""
+    from services.token_billing import spent_today
+
+    rows = db.query(LLMUsage).filter(LLMUsage.user_id == user.id).all()
     total_prompt = sum(row.prompt_tokens or 0 for row in rows)
     total_completion = sum(row.completion_tokens or 0 for row in rows)
-    estimated = sum(
-        _estimate_cost_usd(row.provider or "", row.prompt_tokens or 0, row.completion_tokens or 0)
-        for row in rows
-    )
+    rates = get_rates(db)
+    balance = int(getattr(user, "token_balance", 0) or 0)
     return LLMUsageResponse(
         total_calls=len(rows),
         total_prompt_tokens=total_prompt,
         total_completion_tokens=total_completion,
-        estimated_cost_usd=round(estimated, 4),
+        estimated_cost_usd=0.0,
+        budget_usd=float(rates["signup_grant_tokens"]) / 1000.0,
+        remaining_usd=balance / 1000.0,
+        token_balance=balance,
+        spent_today_tokens=spent_today(db, user.id),
     )

@@ -2,9 +2,11 @@
 
 from fastapi import APIRouter
 
+from api.routers.admin import router as admin_router
 from api.routers.applications import router as applications_router
 from api.routers.auth import router as auth_router
 from api.routers.autopilot import router as autopilot_router
+from api.routers.billing import router as billing_router
 from api.routers.cover_letters import router as cover_letters_router
 from api.routers.digest import router as digest_router
 from api.routers.health import router as health_router
@@ -22,6 +24,8 @@ api_router = APIRouter()
 api_router.include_router(health_router)
 api_router.include_router(auth_router)
 api_router.include_router(users_router)
+api_router.include_router(billing_router)
+api_router.include_router(admin_router)
 api_router.include_router(digest_router)
 api_router.include_router(opportunities_router)
 api_router.include_router(notifications_router)

@@ -13,6 +13,7 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
@@ -51,6 +52,13 @@ class User(Base):
     linkedin_profile_analysis = Column(JSONB, nullable=True)
     # Autopilot cache: resume_score, weekly_skill_plan, chat_memory.
     autopilot = Column(JSONB, nullable=True)
+    # Legacy dollar budget (migrated into token_balance). Kept for older rows.
+    llm_budget_usd = Column(Float, nullable=False, default=1.0)
+    # Prepaid app tokens (1 USD ≈ 1000 tokens). Default starter grant = 1000.
+    token_balance = Column(Integer, nullable=False, default=1000)
+    is_admin = Column(Boolean, nullable=False, default=False)
+    # Per-user preferred LLM provider id (auto|groq|anthropic|...).
+    preferred_llm_provider = Column(String, nullable=True)
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
 
 
@@ -215,7 +223,9 @@ class PipelineRun(Base):
     __tablename__ = "pipeline_runs"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    run_date = Column(Date, unique=True)
+    # Per-tenant run: each user has their own pipeline history for a given date.
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True, index=True)
+    run_date = Column(Date, nullable=False)
     started_at = Column(DateTime(timezone=True))
     completed_at = Column(DateTime(timezone=True))
     status = Column(String)
@@ -227,6 +237,11 @@ class PipelineRun(Base):
     error_message = Column(Text)
     current_stage = Column(String)
     progress_log = Column(JSON, default=list)
+
+    __table_args__ = (
+        # One pipeline run per user per calendar day (multi-tenant).
+        Index("uq_pipeline_user_run_date", "user_id", "run_date", unique=True),
+    )
 
 
 class LLMUsage(Base):
@@ -375,3 +390,75 @@ class NetworkContact(Base):
     agent_meta = Column(JSONB, nullable=True)
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
     updated_at = Column(DateTime(timezone=True), default=datetime.utcnow)
+
+
+class UserLlmKey(Base):
+    """Encrypted per-user BYOK credentials (never store plaintext)."""
+
+    __tablename__ = "user_llm_keys"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False, index=True)
+    provider = Column(String, nullable=False)
+    ciphertext = Column(Text, nullable=False)
+    key_hint = Column(String(8), nullable=False, default="")
+    # Optional model id override for this provider (e.g. openai/gpt-oss-120b).
+    model = Column(String, nullable=True)
+    updated_at = Column(DateTime(timezone=True), default=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("user_id", "provider", name="uq_user_llm_provider"),
+    )
+
+
+class TokenLedger(Base):
+    """Append-only token balance changes for usage graphs and auditing."""
+
+    __tablename__ = "token_ledger"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False, index=True)
+    delta = Column(Integer, nullable=False)
+    balance_after = Column(Integer, nullable=False)
+    reason = Column(String, nullable=False)
+    ref_id = Column(String, nullable=True)
+    note = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), default=datetime.utcnow, index=True)
+
+
+class AppBillingConfig(Base):
+    """Singleton row (id=1) for admin-editable token rates."""
+
+    __tablename__ = "app_billing_config"
+
+    id = Column(Integer, primary_key=True, default=1)
+    pipeline_run_tokens = Column(Integer, nullable=False, default=600)
+    llm_call_tokens = Column(Integer, nullable=False, default=5)
+    signup_grant_tokens = Column(Integer, nullable=False, default=1000)
+    usd_per_thousand_tokens = Column(Float, nullable=False, default=1.0)
+    updated_at = Column(DateTime(timezone=True), default=datetime.utcnow)
+
+
+class UserLlmContext(Base):
+    """Persisted resume + jobs snapshot injected into coach/LLM prompts."""
+
+    __tablename__ = "user_llm_contexts"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+        index=True,
+    )
+    master_resume_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("master_resumes.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    resume_summary = Column(Text, nullable=False, default="")
+    jobs_snapshot = Column(JSONB, nullable=False, default=list)
+    context_text = Column(Text, nullable=False, default="")
+    built_at = Column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)

@@ -13,6 +13,7 @@ from api.deps import APIError, get_current_user, get_db
 from api.schemas.notification import NotificationItem, NotificationListResponse
 from db.models import User
 from services.notifications.feed import list_notifications, mark_all_read, mark_notification_read
+from services.notifications.producers import ensure_pipeline_health_notifications
 from services.notifications.unsubscribe import verify_unsubscribe_token
 
 router = APIRouter(prefix="/notifications", tags=["notifications"])
@@ -38,6 +39,7 @@ def get_notifications(
     unread_only: bool = Query(default=False),
     page: int = Query(default=1, ge=1),
 ) -> NotificationListResponse:
+    ensure_pipeline_health_notifications(db, user)
     rows, unread_count = list_notifications(db, user, unread_only=unread_only, page=page)
     return NotificationListResponse(
         items=[_item_from_row(row) for row in rows],

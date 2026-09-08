@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 
 from db.models import Job, PipelineRun, ScoredOpportunity, User
 from pipeline.cancel import PipelineCancelled, is_cancel_requested
-from pipeline.progress import append_progress, reset_progress
+from pipeline.progress import STAGE_LABELS, append_progress, reset_progress
 from pipeline.sources.base import JobDict
 from pipeline.sources.registry import fetch_all_sources_sync
 from pipeline.stages.blacklist import apply_blacklist
@@ -38,21 +38,52 @@ log = logging.getLogger(__name__)
 ScoredJobDict = dict[str, Any]
 _PROGRESS_EVERY_N_JOBS = 25
 
+# Executable stages in order (excludes starting/complete UI labels).
+PIPELINE_STAGE_ORDER = [
+    "discover",
+    "deduplicate",
+    "store_jobs",
+    "score",
+    "liveness",
+    "company_universe",
+    "legitimacy",
+    "digest",
+    "skill_gap",
+]
+
 
 class PipelineAlreadyRunningError(Exception):
     """Raised when today's pipeline run is already in progress."""
 
 
-def start_pipeline_run(session: Session) -> PipelineRun:
-    """Create or reset today's run record before execution begins."""
+class PipelineContinueError(Exception):
+    """Raised when a pipeline cannot be continued."""
+
+
+def _stage_index(stage: str | None) -> int:
+    if not stage:
+        return 0
+    if stage in PIPELINE_STAGE_ORDER:
+        return PIPELINE_STAGE_ORDER.index(stage)
+    if stage in {"starting", "complete"}:
+        return 0
+    return 0
+
+
+def start_pipeline_run(session: Session, user: User) -> PipelineRun:
+    """Create or reset today's run record for a specific user before execution begins."""
     from pipeline.runner import is_background_pipeline_running
 
     run_date = date.today()
-    run = session.query(PipelineRun).filter_by(run_date=run_date).first()
+    run = (
+        session.query(PipelineRun)
+        .filter_by(run_date=run_date, user_id=user.id)
+        .first()
+    )
     if run is not None and run.status == "running" and run.completed_at is None:
-        if is_background_pipeline_running():
+        if is_background_pipeline_running(user.id):
             raise PipelineAlreadyRunningError()
-        log.warning("Recovering stale pipeline run for %s", run_date)
+        log.warning("Recovering stale pipeline run for %s user=%s", run_date, user.email)
         run.status = "failed"
         run.completed_at = datetime.now(timezone.utc)
         if not run.error_message:
@@ -61,12 +92,14 @@ def start_pipeline_run(session: Session) -> PipelineRun:
 
     if run is None:
         run = PipelineRun(
+            user_id=user.id,
             run_date=run_date,
             started_at=datetime.now(timezone.utc),
             status="running",
         )
         session.add(run)
     else:
+        run.user_id = user.id
         run.started_at = datetime.now(timezone.utc)
         run.status = "running"
         run.completed_at = None
@@ -78,6 +111,58 @@ def start_pipeline_run(session: Session) -> PipelineRun:
     return run
 
 
+def continue_pipeline_run(session: Session, user: User) -> tuple[PipelineRun, str]:
+    """Resume today's failed/cancelled run from the failed stage. Returns (run, resume_from)."""
+    from pipeline.runner import is_background_pipeline_running
+
+    run_date = date.today()
+    run = (
+        session.query(PipelineRun)
+        .filter_by(run_date=run_date, user_id=user.id)
+        .first()
+    )
+    if run is None:
+        raise PipelineContinueError("No pipeline run to continue")
+    if run.status == "running" and is_background_pipeline_running(user.id):
+        raise PipelineAlreadyRunningError()
+    if run.status not in {"failed", "cancelled"}:
+        raise PipelineContinueError(
+            f"Can only continue a failed or cancelled run (status={run.status})"
+        )
+
+    resume_from = run.error_stage or run.current_stage or "discover"
+    if resume_from not in PIPELINE_STAGE_ORDER:
+        resume_from = "discover"
+
+    # If an older version charged before failure, refund before continuing.
+    from services.token_billing import refund_pipeline_run
+
+    refund_pipeline_run(
+        session,
+        user,
+        run.id,
+        note="Refund before continue — failed run is not billed",
+    )
+
+    run.status = "running"
+    run.started_at = datetime.now(timezone.utc)
+    run.completed_at = None
+    run.error_message = None
+    # Keep error_stage until a successful finish so UI knows where we resumed.
+    session.flush()
+    append_progress(
+        session,
+        run,
+        stage=resume_from,
+        message=(
+            f"Continuing pipeline from "
+            f"{STAGE_LABELS.get(resume_from, resume_from)}..."
+        ),
+    )
+    session.commit()
+    return run, resume_from
+
+
 class NightlyPipeline:
     """Orchestrates deterministic nightly job discovery and scoring."""
 
@@ -87,137 +172,254 @@ class NightlyPipeline:
         users: list[User],
         *,
         fetch_fn: Callable[[], list[JobDict]] | None = None,
+        resume_from: str | None = None,
     ) -> None:
         self.session = session
         self.users = users
         self.fetch_fn = fetch_fn or fetch_all_sources_sync
         self.run: PipelineRun | None = None
         self._errors: list[str] = []
+        self._cancel_user_id = users[0].id if len(users) == 1 else None
+        self.resume_from = resume_from if resume_from in PIPELINE_STAGE_ORDER else None
+
+    def _should_run(self, stage: str) -> bool:
+        if self.resume_from is None:
+            return True
+        return _stage_index(stage) >= _stage_index(self.resume_from)
+
+    def _row_to_jobdict(self, row: Job) -> JobDict:
+        return {
+            "source": row.source,
+            "external_id": row.external_id,
+            "url": row.url,
+            "company": row.company,
+            "title": row.title,
+            "country": row.country,
+            "city": row.city,
+            "remote_type": row.remote_type,
+            "salary_display": row.salary_display,
+            "visa_keywords": list(row.visa_keywords or []),
+            "skills_required": list(row.skills_required or []),
+            "experience_min": row.experience_min,
+            "description": row.description,
+            "posted_at": row.posted_at,
+        }
+
+    def _load_jobs_from_db(self) -> list[JobDict]:
+        """Rebuild in-memory jobs when resuming after store_jobs."""
+        from sqlalchemy import func
+
+        today = date.today()
+        rows = (
+            self.session.query(Job)
+            .filter(Job.is_active.is_(True), func.date(Job.created_at) == today)
+            .order_by(Job.created_at.desc())
+            .limit(5000)
+            .all()
+        )
+        if not rows:
+            limit = 500
+            if self.run and self.run.jobs_after_dedup:
+                limit = max(50, min(5000, int(self.run.jobs_after_dedup)))
+            rows = (
+                self.session.query(Job)
+                .filter(Job.is_active.is_(True))
+                .order_by(Job.created_at.desc())
+                .limit(limit)
+                .all()
+            )
+        return [self._row_to_jobdict(row) for row in rows]
 
     def run_pipeline(self) -> PipelineRun:
         """Execute all pipeline stages and return the run record."""
+        if not self.users:
+            raise ValueError("NightlyPipeline requires at least one user")
+        # Multi-tenant: each pipeline execution is scoped to exactly one user.
+        if len(self.users) != 1:
+            raise ValueError("NightlyPipeline runs one user at a time")
+        user = self.users[0]
         run_date = date.today()
         self.run = (
-            self.session.query(PipelineRun).filter_by(run_date=run_date).first()
+            self.session.query(PipelineRun)
+            .filter_by(run_date=run_date, user_id=user.id)
+            .first()
         )
         if self.run is None:
             self.run = PipelineRun(
+                user_id=user.id,
                 run_date=run_date,
                 started_at=datetime.now(timezone.utc),
                 status="running",
             )
             self.session.add(self.run)
         else:
+            self.run.user_id = user.id
             self.run.started_at = datetime.now(timezone.utc)
             self.run.status = "running"
-            self.run.error_stage = None
-            self.run.error_message = None
-        reset_progress(self.session, self.run)
-        append_progress(self.session, self.run, stage="starting", message="Pipeline run started")
+            self.run.completed_at = None
+            if self.resume_from is None:
+                self.run.error_stage = None
+                self.run.error_message = None
+        if self.resume_from is None:
+            reset_progress(self.session, self.run)
+            append_progress(
+                self.session,
+                self.run,
+                stage="starting",
+                message=f"Pipeline run started for {user.email}",
+            )
+        else:
+            append_progress(
+                self.session,
+                self.run,
+                stage=self.resume_from,
+                message=(
+                    f"Resuming for {user.email} at "
+                    f"{STAGE_LABELS.get(self.resume_from, self.resume_from)}"
+                ),
+            )
 
         jobs: list[JobDict] = []
         try:
             self._abort_if_cancelled()
-            discovered = self._run_stage("discover", self._discover)
-            jobs = discovered if discovered is not None else []
-            self.run.jobs_discovered = len(jobs)
-            self.session.commit()
-            append_progress(
-                self.session,
-                self.run,
-                stage="discover",
-                message=f"Discovered {len(jobs)} jobs from job boards",
-            )
 
-            jobs = self._run_stage("deduplicate", lambda: self._deduplicate(jobs))
-            jobs = jobs if jobs is not None else []
-            self.run.jobs_after_dedup = len(jobs)
-            self.session.commit()
-            append_progress(
-                self.session,
-                self.run,
-                stage="deduplicate",
-                message=f"{len(jobs)} jobs after deduplication",
-            )
+            if self._should_run("discover"):
+                discovered = self._run_stage("discover", self._discover)
+                jobs = discovered if discovered is not None else []
+                self.run.jobs_discovered = len(jobs)
+                self.session.commit()
+                append_progress(
+                    self.session,
+                    self.run,
+                    stage="discover",
+                    message=f"Discovered {len(jobs)} jobs from job boards",
+                )
+            elif self._should_run("deduplicate") or self._should_run("store_jobs") or self._should_run("score"):
+                # Resuming mid-pipeline without rediscover — load stored jobs if past store.
+                pass
 
-            self._run_stage("store_jobs", lambda: self._store_jobs(jobs))
-            append_progress(
-                self.session,
-                self.run,
-                stage="store_jobs",
-                message=f"Stored {len(jobs)} jobs in database",
-            )
+            if self._should_run("deduplicate"):
+                if not jobs and not self._should_run("discover"):
+                    # Resuming at deduplicate without fresh discover is not useful; rediscover.
+                    discovered = self._run_stage("discover", self._discover)
+                    jobs = discovered if discovered is not None else []
+                    self.run.jobs_discovered = len(jobs)
+                jobs = self._run_stage("deduplicate", lambda: self._deduplicate(jobs))
+                jobs = jobs if jobs is not None else []
+                self.run.jobs_after_dedup = len(jobs)
+                self.session.commit()
+                append_progress(
+                    self.session,
+                    self.run,
+                    stage="deduplicate",
+                    message=f"{len(jobs)} jobs after deduplication",
+                )
+
+            if self._should_run("store_jobs"):
+                if not jobs:
+                    discovered = self._run_stage("discover", self._discover)
+                    jobs = discovered if discovered is not None else []
+                    self.run.jobs_discovered = len(jobs)
+                    jobs = self._run_stage("deduplicate", lambda: self._deduplicate(jobs)) or []
+                    self.run.jobs_after_dedup = len(jobs)
+                self._run_stage("store_jobs", lambda: self._store_jobs(jobs))
+                append_progress(
+                    self.session,
+                    self.run,
+                    stage="store_jobs",
+                    message=f"Stored {len(jobs)} jobs in database",
+                )
+            elif self._should_run("score") or self._should_run("digest"):
+                jobs = self._load_jobs_from_db()
+                append_progress(
+                    self.session,
+                    self.run,
+                    stage=self.resume_from or "score",
+                    message=f"Loaded {len(jobs)} stored jobs to continue",
+                )
 
             total_scored = 0
             total_top = 0
             universe_jobs: list[ScoredJobDict] = []
 
-            for user in self.users:
-                self._abort_if_cancelled()
-                append_progress(
-                    self.session,
-                    self.run,
-                    stage="score",
-                    message=f"Scoring jobs for {user.email}...",
-                )
-                user_opps, scored_count, top_count = self._score_for_user(jobs, user)
-                total_scored += scored_count
-                total_top += top_count
-                if user_opps:
-                    universe_jobs.extend(
-                        opp
-                        for opp in user_opps
-                        if opp.get("overall_score", 0) >= DIGEST_MIN_SCORE
+            if self._should_run("score"):
+                for user in self.users:
+                    self._abort_if_cancelled()
+                    append_progress(
+                        self.session,
+                        self.run,
+                        stage="score",
+                        message=f"Scoring jobs for {user.email}...",
                     )
+                    user_opps, scored_count, top_count = self._score_for_user(jobs, user)
+                    total_scored += scored_count
+                    total_top += top_count
+                    if user_opps:
+                        universe_jobs.extend(
+                            opp
+                            for opp in user_opps
+                            if opp.get("overall_score", 0) >= DIGEST_MIN_SCORE
+                        )
+                    append_progress(
+                        self.session,
+                        self.run,
+                        stage="score",
+                        message=(
+                            f"Scored {scored_count} jobs for {user.email} "
+                            f"({top_count} with score ≥ {int(DIGEST_MIN_SCORE)})"
+                        ),
+                    )
+
+                self.run.jobs_scored = total_scored
+                self.run.top_opportunities = total_top
+                self.session.commit()
+
+            if self._should_run("liveness"):
                 append_progress(
                     self.session,
                     self.run,
-                    stage="score",
-                    message=(
-                        f"Scored {scored_count} jobs for {user.email} "
-                        f"({top_count} with score ≥ {int(DIGEST_MIN_SCORE)})"
-                    ),
+                    stage="liveness",
+                    message="Scheduling background liveness checks on job URLs...",
                 )
+                schedule_liveness_verification(self.session)
 
-            self.run.jobs_scored = total_scored
-            self.run.top_opportunities = total_top
-            self.session.commit()
+            if self._should_run("company_universe"):
+                if not universe_jobs and jobs:
+                    # Re-score lightly skipped — build universe from existing high scores if any.
+                    pass
+                if universe_jobs:
+                    self._run_stage(
+                        "company_universe",
+                        lambda: update_company_universe(universe_jobs, self.session),
+                    )
 
-            append_progress(
-                self.session,
-                self.run,
-                stage="liveness",
-                message="Scheduling background liveness checks on job URLs...",
-            )
-            schedule_liveness_verification(self.session)
+            if self._should_run("legitimacy"):
+                self._run_stage("legitimacy", self._apply_legitimacy_flags)
 
-            if universe_jobs:
+            if self._should_run("digest"):
+                if not jobs:
+                    jobs = self._load_jobs_from_db()
+                for user in self.users:
+                    self._abort_if_cancelled()
+                    append_progress(
+                        self.session,
+                        self.run,
+                        stage="digest",
+                        message=f"Generating daily digest for {user.email}...",
+                    )
+                    self._run_stage(
+                        "digest",
+                        lambda u=user: self._generate_digest(u, jobs),
+                    )
+
+            if self._should_run("skill_gap"):
                 self._run_stage(
-                    "company_universe",
-                    lambda: update_company_universe(universe_jobs, self.session),
+                    "skill_gap",
+                    lambda: maybe_generate_skill_gap_reports(self.session, self.users),
                 )
-
-            self._run_stage("legitimacy", self._apply_legitimacy_flags)
-
-            for user in self.users:
-                self._abort_if_cancelled()
-                append_progress(
-                    self.session,
-                    self.run,
-                    stage="digest",
-                    message=f"Generating daily digest for {user.email}...",
-                )
-                self._run_stage(
-                    "digest",
-                    lambda u=user: self._generate_digest(u, jobs),
-                )
-
-            self._run_stage(
-                "skill_gap",
-                lambda: maybe_generate_skill_gap_reports(self.session, self.users),
-            )
 
             self.run.status = "partial" if self._errors else "success"
+            self.run.error_stage = None
             append_progress(
                 self.session,
                 self.run,
@@ -227,6 +429,8 @@ class NightlyPipeline:
         except PipelineCancelled:
             log.info("Pipeline cancelled by user")
             self.run.status = "cancelled"
+            if not self.run.error_stage:
+                self.run.error_stage = self.run.current_stage
             append_progress(
                 self.session,
                 self.run,
@@ -237,6 +441,8 @@ class NightlyPipeline:
             log.exception("Pipeline failed")
             self.run.status = "failed"
             self.run.error_message = str(exc)
+            if not self.run.error_stage:
+                self.run.error_stage = self.run.current_stage
             append_progress(
                 self.session,
                 self.run,
@@ -248,12 +454,17 @@ class NightlyPipeline:
             self.run.completed_at = datetime.now(timezone.utc)
             if self._errors and self.run.status != "failed":
                 self.run.error_message = "; ".join(self._errors[:3])
+            if self.run.status in ("failed", "partial") and self.users:
+                from services.notifications.producers import enqueue_pipeline_status_notification
+
+                enqueue_pipeline_status_notification(self.session, self.users[0], self.run)
             self.session.commit()
 
         return self.run
 
     def _abort_if_cancelled(self) -> None:
-        if is_cancel_requested():
+        user_id = getattr(self, "_cancel_user_id", None)
+        if is_cancel_requested(user_id):
             raise PipelineCancelled()
 
     def _run_stage(self, stage: str, fn: Callable[[], Any]) -> Any:
@@ -580,8 +791,59 @@ class NightlyPipeline:
         )
 
 
-def run_nightly_pipeline(session: Session) -> PipelineRun:
-    """Load active users and execute the nightly pipeline."""
-    users = session.query(User).all()
-    pipeline = NightlyPipeline(session, users)
-    return pipeline.run_pipeline()
+def run_nightly_pipeline(
+    session: Session,
+    user: User | None = None,
+    *,
+    resume_from: str | None = None,
+) -> PipelineRun:
+    """Execute the pipeline for one user (or each user sequentially when ``user`` is None)."""
+    from services.token_billing import (
+        enforce_balance,
+        get_rates,
+        maybe_charge_successful_pipeline,
+        refund_pipeline_run,
+    )
+
+    def _run_one(u: User, *, from_stage: str | None = None) -> PipelineRun:
+        rates = get_rates(session)
+        # Reserve balance check only for fresh runs (continues are free until success).
+        if from_stage is None:
+            enforce_balance(session, u, int(rates["pipeline_run_tokens"]))
+        pipeline = NightlyPipeline(session, [u], resume_from=from_stage)
+        run = pipeline.run_pipeline()
+        if run.status in {"failed", "cancelled"}:
+            refund_pipeline_run(
+                session,
+                u,
+                run.id,
+                note=f"Pipeline {run.status} — tokens refunded",
+            )
+        else:
+            maybe_charge_successful_pipeline(session, u, run)
+            try:
+                from services.llm_context import rebuild_user_llm_context
+
+                rebuild_user_llm_context(session, u)
+            except Exception:
+                log.exception("Failed to rebuild LLM context after pipeline for %s", u.email)
+        session.commit()
+        return run
+
+    if user is not None:
+        return _run_one(user, from_stage=resume_from)
+
+    users = session.query(User).order_by(User.created_at.asc()).all()
+    if not users:
+        raise RuntimeError("No users to run pipeline for")
+
+    last_run: PipelineRun | None = None
+    for u in users:
+        log.info("Starting per-user pipeline for %s", u.email)
+        try:
+            last_run = _run_one(u)
+        except Exception:
+            log.exception("Per-user pipeline failed for %s", u.email)
+    if last_run is None:
+        raise RuntimeError("Pipeline did not produce a run record")
+    return last_run

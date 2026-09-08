@@ -60,7 +60,7 @@ class Settings(BaseSettings):
     anthropic_api_key: str = ""
     openai_api_key: str = ""
     groq_api_key: str = ""
-    groq_model: str = "llama-3.3-70b-versatile"
+    groq_model: str = "openai/gpt-oss-120b"
     groq_base_url: str = "https://api.groq.com/openai/v1"
     deepseek_api_key: str = ""
     deepseek_model: str = "deepseek-chat"
@@ -88,6 +88,13 @@ class Settings(BaseSettings):
     # auto = try LLM providers then heuristic; llm = LLM only; heuristic = free local parsing
     resume_parser_mode: str = "auto"
     dashboard_secret: str = "changeme"
+    # Optional Fernet key (url-safe base64 32-byte). If empty, derived from DASHBOARD_SECRET.
+    llm_keys_encryption_key: str = Field(default="", validation_alias="LLM_KEYS_ENCRYPTION_KEY")
+
+    # Optional first admin user created on startup when email is not already present.
+    seed_user_email: str = Field(default="", validation_alias="SEED_USER_EMAIL")
+    seed_user_password: str = Field(default="", validation_alias="SEED_USER_PASSWORD")
+    seed_user_name: str = Field(default="Admin", validation_alias="SEED_USER_NAME")
 
     # development | production — gates default-secret enforcement and error detail exposure.
     app_env: str = "development"
